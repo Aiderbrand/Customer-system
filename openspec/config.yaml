@@ -1,0 +1,32 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Node.js 20 monorepo con Turborepo; NestJS + Prisma + PostgreSQL en apps/api; Next.js 16 + React 19 + shadcn/ui en apps/web.
+  Architecture: backend modular con guards, repository/service layers y auditoría; frontend tipado con contexto de auth y RBAC compartido.
+  Testing: Jest en api; Vitest + Testing Library en web.
+  Style: TypeScript estricto, ESLint, Prettier y Tailwind/shadcn con aliases de workspace.
+
+rules:
+  proposal:
+    - Incluir rollback plan para cambios riesgosos.
+    - Identificar módulos afectados en apps/api, apps/web y prisma cuando aplique.
+    - Explicitar impacto en multi-tenant, RBAC y auditoría.
+  specs:
+    - Usar escenarios Given/When/Then con RFC 2119.
+    - No asumir estructuras ni lógica no definida.
+    - Definir permisos, estados y edge cases antes de implementar.
+  design:
+    - Documentar decisiones con tradeoffs cuando toque guards, auth o tenancy.
+    - Incluir secuencia para flujos con auth, impersonación o cambios de contexto.
+  tasks:
+    - Agrupar por infraestructura, backend, frontend y verificación.
+    - Mantener tareas chicas y trazables en una sesión.
+  apply:
+    - Seguir backend modular, repository pattern, service layer y DTO validation.
+    - Mantener estados controlados desde backend y auditoría obligatoria.
+  verify:
+    test_command: "npm --prefix aiderbrand-system --workspace api test && npm --prefix aiderbrand-system --workspace web test"
+    build_command: ""
+    coverage_threshold: 0
+  archive:
+    - Advertir antes de fusionar deltas destructivos o que alteren trazabilidad.
