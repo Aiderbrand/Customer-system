@@ -34,10 +34,14 @@ RUN npm ci --omit=dev
 COPY --from=build /app/node_modules/.bin/prisma ./node_modules/.bin/prisma
 COPY --from=build /app/node_modules/prisma ./node_modules/prisma
 
+# Copy generated Prisma client from build stage (schema not present during npm ci --omit=dev)
+COPY --from=build /app/node_modules/.prisma ./node_modules/.prisma
+COPY --from=build /app/node_modules/@prisma/client ./node_modules/@prisma/client
+
 # Copy built app + Prisma schema + migrations
 COPY --from=build /app/apps/api/dist ./apps/api/dist
 COPY --from=build /app/apps/api/prisma ./apps/api/prisma
 
 WORKDIR /app/apps/api
 EXPOSE 3001
-CMD ["sh", "-c", "/app/node_modules/.bin/prisma migrate deploy && node dist/main"]
+CMD ["sh", "-c", "/app/node_modules/.bin/prisma migrate deploy && node dist/src/main"]
