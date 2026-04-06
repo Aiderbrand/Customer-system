@@ -5,6 +5,7 @@ WORKDIR /app
 FROM base AS deps
 COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/
+COPY apps/web/package.json ./apps/web/
 COPY packages/ui/package.json ./packages/ui/
 COPY packages/typescript-config/package.json ./packages/typescript-config/
 COPY packages/eslint-config/package.json ./packages/eslint-config/
@@ -15,6 +16,8 @@ FROM base AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+# Explicitly add monorepo root binaries to PATH so nest CLI is found
+ENV PATH="/app/node_modules/.bin:${PATH}"
 RUN npm run build --workspace=api
 
 # ── Stage 3: production image ──────────────────────────────────────────────────
@@ -25,6 +28,7 @@ ENV NODE_ENV=production
 # Production deps only
 COPY package.json package-lock.json ./
 COPY apps/api/package.json ./apps/api/
+COPY apps/web/package.json ./apps/web/
 COPY packages/ui/package.json ./packages/ui/
 COPY packages/typescript-config/package.json ./packages/typescript-config/
 COPY packages/eslint-config/package.json ./packages/eslint-config/
