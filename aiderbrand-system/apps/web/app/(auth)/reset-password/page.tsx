@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { Suspense, useState } from "react"
 import Link from "next/link"
 import { useRouter, useSearchParams } from "next/navigation"
 import { Input } from "@workspace/ui/components/input"
@@ -10,7 +10,7 @@ import { Alert, AlertDescription } from "@workspace/ui/components/alert"
 import { AuthPageShell } from "@/components/auth/auth-page-shell"
 import { useAuth } from "@/contexts/auth-context"
 
-export default function ResetPasswordPage() {
+function ResetPasswordForm() {
   const router = useRouter()
   const searchParams = useSearchParams()
   const { resetPassword } = useAuth()
@@ -44,18 +44,7 @@ export default function ResetPasswordPage() {
   }
 
   return (
-    <AuthPageShell
-      title="Definir nueva contraseña"
-      description="Elegí una nueva contraseña para recuperar el acceso a tu cuenta."
-      footer={
-        <Link
-          href="/login"
-          className="block text-sm text-primary hover:underline"
-        >
-          Volver al login
-        </Link>
-      }
-    >
+    <>
       {!token ? (
         <Alert variant="destructive">
           <AlertDescription>
@@ -97,6 +86,27 @@ export default function ResetPasswordPage() {
           {submitting ? "Guardando…" : "Actualizar contraseña"}
         </Button>
       </form>
+    </>
+  )
+}
+
+export default function ResetPasswordPage() {
+  return (
+    <AuthPageShell
+      title="Definir nueva contraseña"
+      description="Elegí una nueva contraseña para recuperar el acceso a tu cuenta."
+      footer={
+        <Link
+          href="/login"
+          className="block text-sm text-primary hover:underline"
+        >
+          Volver al login
+        </Link>
+      }
+    >
+      <Suspense>
+        <ResetPasswordForm />
+      </Suspense>
     </AuthPageShell>
   )
 }
