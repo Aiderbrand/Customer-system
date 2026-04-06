@@ -15,7 +15,7 @@ FROM base AS build
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN npx turbo build --filter=api
+RUN npm run build --workspace=api
 
 # ── Stage 3: production image ──────────────────────────────────────────────────
 FROM base AS runner
