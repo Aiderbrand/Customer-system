@@ -1,1 +1,24 @@
+# Dependencies
 node_modules
+
+# Environment variables — never commit secrets
+.env
+.env.*
+!.env.example
+
+# macOS
+.DS_Store
+
+# Claude Code local config
+.claude/
+
+# AI workflow files — local only
+openspec/
+.agents/
+.atl/
+skills-lock.json
+opencode.json
+.gga
+.mcp.json
+AGENTS.md
+PROJECT_SPEC.md
