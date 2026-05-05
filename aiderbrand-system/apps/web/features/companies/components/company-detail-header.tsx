@@ -1,7 +1,7 @@
 'use client'
 
 import Link from 'next/link'
-import { MailPlus, Pencil, Power, Building2 } from 'lucide-react'
+import { MailPlus, Pencil, Power, Building2, UserPlus } from 'lucide-react'
 import {
   Breadcrumb,
   BreadcrumbItem,
@@ -19,9 +19,11 @@ interface CompanyDetailHeaderProps {
   companySlug: string
   isActive: boolean
   canInvite: boolean
+  canInviteClient: boolean
   canEdit: boolean
   canUpdateStatus: boolean
   onInvite: () => void
+  onInviteClient: () => void
   onEdit: () => void
   onToggleStatus: () => void
 }
@@ -31,9 +33,11 @@ export function CompanyDetailHeader({
   companySlug,
   isActive,
   canInvite,
+  canInviteClient,
   canEdit,
   canUpdateStatus,
   onInvite,
+  onInviteClient,
   onEdit,
   onToggleStatus,
 }: CompanyDetailHeaderProps) {
@@ -92,10 +96,16 @@ export function CompanyDetailHeader({
         </div>
       </CardContent>
 
-      {(canInvite || canEdit || canUpdateStatus) ? (
+      {(canInvite || canInviteClient || canEdit || canUpdateStatus) ? (
         <CardFooter className="flex flex-wrap items-center gap-2 border-t pt-6">
+          {canInviteClient ? (
+            <Button onClick={onInviteClient} data-testid="company-invite-client-cta">
+              <UserPlus />
+              Invitar cliente al onboarding
+            </Button>
+          ) : null}
           {canInvite ? (
-            <Button onClick={onInvite} data-testid="company-primary-cta">
+            <Button variant="outline" onClick={onInvite} data-testid="company-primary-cta">
               <MailPlus />
               Invite member
             </Button>

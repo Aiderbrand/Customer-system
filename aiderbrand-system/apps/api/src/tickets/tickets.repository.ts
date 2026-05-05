@@ -1,10 +1,37 @@
 import { Injectable } from '@nestjs/common'
-import type { Priority, TicketStatus } from '@prisma/client'
+import type { Priority, Ticket, TicketStatus } from '@prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 
 @Injectable()
 export class TicketsRepository {
   constructor(private readonly prisma: PrismaService) {}
+
+  async countByProjectIds(
+    projectIds: string[],
+    options?: { excludeStatuses?: TicketStatus[] },
+  ): Promise<Map<string, number>> {
+    if (projectIds.length === 0) return new Map()
+    const rows = await this.prisma.ticket.groupBy({
+      by: ['projectId'],
+      where: {
+        projectId: { in: projectIds },
+        deletedAt: null,
+        ...(options?.excludeStatuses?.length ? { status: { notIn: options.excludeStatuses } } : {}),
+      },
+      _count: { id: true },
+    })
+    return new Map(rows.filter((r) => r.projectId).map((r) => [r.projectId!, r._count.id]))
+  }
+
+  async findSummaryByProjectId(
+    projectId: string,
+  ): Promise<Array<Pick<Ticket, 'id' | 'title' | 'status' | 'priority'>>> {
+    return this.prisma.ticket.findMany({
+      where: { projectId, deletedAt: null },
+      select: { id: true, title: true, status: true, priority: true },
+      orderBy: { createdAt: 'desc' },
+    })
+  }
 
   async findMany(params: {
     companyIds: string[]
@@ -46,14 +73,6 @@ export class TicketsRepository {
     })
   }
 
-  async findProjectNames(ids: string[]): Promise<Array<{ id: string; name: string }>> {
-    if (ids.length === 0) return []
-    return this.prisma.project.findMany({
-      where: { id: { in: ids }, deletedAt: null },
-      select: { id: true, name: true },
-    })
-  }
-
   async create(data: {
     companyId: string
     title: string
@@ -63,31 +82,16 @@ export class TicketsRepository {
     createdById: string
     slaDeadline?: Date | null
   }) {
-    return this.prisma.$transaction(async (tx) => {
-      const ticket = await tx.ticket.create({
-        data: {
-          companyId: data.companyId,
-          title: data.title,
-          description: data.description,
-          priority: data.priority,
-          projectId: data.projectId ?? null,
-          createdById: data.createdById,
-          slaDeadline: data.slaDeadline ?? null,
-        },
-      })
-
-      await tx.auditLog.create({
-        data: {
-          actorId: data.createdById,
-          companyId: data.companyId,
-          action: 'ticket.created',
-          entityType: 'Ticket',
-          entityId: ticket.id,
-          metadata: { title: data.title, priority: data.priority },
-        },
-      })
-
-      return ticket
+    return this.prisma.ticket.create({
+      data: {
+        companyId: data.companyId,
+        title: data.title,
+        description: data.description,
+        priority: data.priority,
+        projectId: data.projectId ?? null,
+        createdById: data.createdById,
+        slaDeadline: data.slaDeadline ?? null,
+      },
     })
   }
 
@@ -111,31 +115,10 @@ export class TicketsRepository {
     })
   }
 
-  async changeStatus(
-    ticketId: string,
-    newStatus: TicketStatus,
-    changedById: string,
-    companyId: string,
-    previousStatus: TicketStatus,
-  ) {
-    return this.prisma.$transaction(async (tx) => {
-      const ticket = await tx.ticket.update({
-        where: { id: ticketId },
-        data: { status: newStatus },
-      })
-
-      await tx.auditLog.create({
-        data: {
-          actorId: changedById,
-          companyId,
-          action: 'ticket.status_changed',
-          entityType: 'Ticket',
-          entityId: ticketId,
-          metadata: { from: previousStatus, to: newStatus },
-        },
-      })
-
-      return ticket
+  async changeStatus(ticketId: string, newStatus: TicketStatus) {
+    return this.prisma.ticket.update({
+      where: { id: ticketId },
+      data: { status: newStatus },
     })
   }
 

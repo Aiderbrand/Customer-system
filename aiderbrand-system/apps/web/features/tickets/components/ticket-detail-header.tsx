@@ -1,6 +1,4 @@
 import { FolderOpen, User } from 'lucide-react'
-import { Badge } from '@workspace/ui/components/badge'
-import { Card, CardContent, CardHeader, CardTitle } from '@workspace/ui/components/card'
 import {
   Select,
   SelectContent,
@@ -10,19 +8,8 @@ import {
 } from '@workspace/ui/components/select'
 import { TicketStatusBadge } from './ticket-status-badge'
 import { TicketPriorityBadge } from './ticket-priority-badge'
-import type { Ticket } from '@/lib/types'
-import type { TicketStatus } from '@/lib/types'
-
-// ─── Constants ────────────────────────────────────────────────────────────────
-
-const STATUS_OPTIONS: { value: TicketStatus; label: string }[] = [
-  { value: 'pendiente', label: 'Pendiente' },
-  { value: 'en_revision', label: 'En revisión' },
-  { value: 'en_proceso', label: 'En proceso' },
-  { value: 'cerrado', label: 'Cerrado' },
-]
-
-// ─── Props ────────────────────────────────────────────────────────────────────
+import { TICKET_STATUS_OPTIONS } from '@/lib/status-configs'
+import type { Ticket, TicketStatus } from '@/lib/types'
 
 interface TicketDetailHeaderProps {
   ticket: Ticket
@@ -35,14 +22,6 @@ interface TicketDetailHeaderProps {
   members: { id: string; name: string }[]
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
-
-/**
- * TicketDetailHeader — header section for ticket detail.
- * Shows title, status/priority badges, project/assignee meta, and RBAC-gated action selects.
- * SLA and dates are intentionally NOT shown here — they live once in the right sidebar.
- * Pure presentational — actions via callbacks.
- */
 export function TicketDetailHeader({
   ticket,
   projectName,
@@ -54,78 +33,65 @@ export function TicketDetailHeader({
   members,
 }: TicketDetailHeaderProps) {
   return (
-    <Card className="shadow-sm">
-      <CardHeader className="gap-4 border-b">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="flex min-w-0 flex-col gap-2">
-            <CardTitle className="text-xl leading-tight">{ticket.title}</CardTitle>
-            <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-              <Badge variant="secondary" className="gap-1.5 font-normal">
-                <FolderOpen className="size-3.5" aria-hidden="true" />
-                {projectName ?? 'Sin proyecto'}
-              </Badge>
-              <Badge variant="outline" className="gap-1.5 font-normal">
-                <User className="size-3.5" aria-hidden="true" />
-                {assigneeName ?? 'Sin asignar'}
-              </Badge>
-            </div>
-          </div>
-
-          <div className="flex shrink-0 items-center gap-2">
-            <TicketStatusBadge status={ticket.status} />
-            <TicketPriorityBadge priority={ticket.priority} />
-          </div>
+    <div className="flex items-start justify-between gap-4">
+      {/* Left: title + meta */}
+      <div className="flex min-w-0 flex-col gap-1.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <TicketStatusBadge status={ticket.status} />
+          <TicketPriorityBadge priority={ticket.priority} />
         </div>
-      </CardHeader>
+        <h1 className="text-lg font-semibold leading-tight text-foreground">{ticket.title}</h1>
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          {projectName && (
+            <span className="flex items-center gap-1">
+              <FolderOpen className="h-3 w-3 shrink-0" />
+              {projectName}
+            </span>
+          )}
+          {projectName && (assigneeName !== undefined) && (
+            <span className="text-muted-foreground/40">·</span>
+          )}
+          <span className="flex items-center gap-1">
+            <User className="h-3 w-3 shrink-0" />
+            {assigneeName ?? 'Sin asignar'}
+          </span>
+        </div>
+      </div>
 
-      {(canChangeStatus || canAssign) ? (
-        <CardContent className="flex flex-wrap items-center gap-3 pt-4">
-          {/* Status change */}
+      {/* Right: action selects */}
+      {(canChangeStatus || canAssign) && (
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
           {canChangeStatus && (
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">Estado:</span>
-              <Select
-                value={ticket.status}
-                onValueChange={(value) => onStatusChange(value as TicketStatus)}
-              >
-                <SelectTrigger className="h-8 w-full sm:w-[160px] text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {STATUS_OPTIONS.map((opt) => (
-                    <SelectItem key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            <Select value={ticket.status} onValueChange={(v) => onStatusChange(v as TicketStatus)}>
+              <SelectTrigger className="h-7 w-[130px] text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {TICKET_STATUS_OPTIONS.map((opt) => (
+                  <SelectItem key={opt.value} value={opt.value}>{opt.label}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           )}
 
-          {/* Assignee change */}
           {canAssign && (
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">Asignar a:</span>
-              <Select
-                value={ticket.assignedToId ?? 'unassigned'}
-                onValueChange={(value) => onAssign(value === 'unassigned' ? '' : value)}
-              >
-                <SelectTrigger className="h-8 w-full sm:w-[180px] text-xs">
-                  <SelectValue placeholder="Sin asignar" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="unassigned">Sin asignar</SelectItem>
-                  {members.map((member) => (
-                    <SelectItem key={member.id} value={member.id}>
-                      {member.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
+            <Select
+              value={ticket.assignedToId ?? 'unassigned'}
+              onValueChange={(v) => onAssign(v === 'unassigned' ? '' : v)}
+            >
+              <SelectTrigger className="h-7 w-[150px] text-xs">
+                <SelectValue placeholder="Sin asignar" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="unassigned">Sin asignar</SelectItem>
+                {members.map((m) => (
+                  <SelectItem key={m.id} value={m.id}>{m.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           )}
-        </CardContent>
-      ) : null}
-    </Card>
+        </div>
+      )}
+    </div>
   )
 }

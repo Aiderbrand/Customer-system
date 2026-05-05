@@ -1,11 +1,6 @@
-import { ConflictException, Injectable } from '@nestjs/common'
-import { Prisma, type AuditLog, type Company, type CompanyMembership, type InvitationStatus, type Role } from '@prisma/client'
+import { Injectable } from '@nestjs/common'
+import { OnboardingStatus, Prisma, type Company, type InvitationStatus, type Role } from '@prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
-
-export interface CreateCompanyWithCreatorMembershipResult {
-  company: Company
-  creatorMembership: CompanyMembership
-}
 
 export interface CompanyHubRecord extends Company {
   activeMemberCount: number
@@ -98,6 +93,7 @@ export class CompaniesRepository {
         createdAt: company.createdAt,
         updatedAt: company.updatedAt,
         deletedAt: company.deletedAt,
+        onboardingStatus: company.onboardingStatus,
         activeMemberCount: company._count.memberships,
         pendingInvitationCount: company._count.invitations,
       })),
@@ -182,6 +178,7 @@ export class CompaniesRepository {
         createdAt: company.createdAt,
         updatedAt: company.updatedAt,
         deletedAt: company.deletedAt,
+        onboardingStatus: company.onboardingStatus,
         activeMemberCount: company._count.memberships,
         pendingInvitationCount: company._count.invitations,
       })),
@@ -197,140 +194,52 @@ export class CompaniesRepository {
 
   async updateCompany(data: {
     companyId: string
-    actorId: string
-    actorRole: Role
     name: string
     slug: string
   }): Promise<Company> {
-    try {
-      return await this.prisma.$transaction(async (tx) => {
-        const company = await tx.company.update({
-          where: { id: data.companyId },
-          data: {
-            name: data.name,
-            slug: data.slug,
-          },
-        })
-
-        await tx.auditLog.create({
-          data: {
-            actorId: data.actorId,
-            companyId: company.id,
-            action: 'company.updated',
-            entityType: 'Company',
-            entityId: company.id,
-            metadata: {
-              name: company.name,
-              slug: company.slug,
-              actorRole: data.actorRole,
-            },
-          },
-        })
-
-        return company
-      })
-    } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        throw new ConflictException(`Company slug "${data.slug}" already exists`)
-      }
-
-      throw error
-    }
+    return this.prisma.company.update({
+      where: { id: data.companyId, deletedAt: null },
+      data: { name: data.name, slug: data.slug },
+    })
   }
 
   async updateStatus(data: {
     companyId: string
-    actorId: string
-    actorRole: Role
     isActive: boolean
   }): Promise<Company> {
-    return this.prisma.$transaction(async (tx) => {
-      const company = await tx.company.update({
-        where: { id: data.companyId },
-        data: {
-          isActive: data.isActive,
-        },
-      })
-
-      await tx.auditLog.create({
-        data: {
-          actorId: data.actorId,
-          companyId: company.id,
-          action: data.isActive ? 'company.activated' : 'company.deactivated',
-          entityType: 'Company',
-          entityId: company.id,
-          metadata: {
-            isActive: company.isActive,
-            actorRole: data.actorRole,
-          },
-        },
-      })
-
-      return company
+    return this.prisma.company.update({
+      where: { id: data.companyId, deletedAt: null },
+      data: { isActive: data.isActive },
     })
   }
 
-  async listActivity(companyId: string, take = 20): Promise<AuditLog[]> {
-    return this.prisma.auditLog.findMany({
-      where: {
-        companyId,
-      },
-      orderBy: {
-        createdAt: 'desc',
-      },
-      take,
+  async createInTx(
+    tx: Prisma.TransactionClient,
+    data: { name: string; slug: string },
+  ): Promise<Company> {
+    return tx.company.create({ data: { name: data.name, slug: data.slug } })
+  }
+
+  async updateOnboardingStatus(companyId: string, status: OnboardingStatus): Promise<void> {
+    await this.prisma.company.update({
+      where: { id: companyId, deletedAt: null },
+      data: { onboardingStatus: status },
     })
   }
 
-  async createWithCreatorMembership(data: {
-    actorId: string
-    actorRole: Role
-    sourceCompanyId?: string
-    name: string
-    slug: string
-  }): Promise<CreateCompanyWithCreatorMembershipResult> {
-    try {
-      return await this.prisma.$transaction(async (tx) => {
-        const company = await tx.company.create({
-          data: {
-            name: data.name,
-            slug: data.slug,
-          },
-        })
+  async updateOnboardingStatusInTx(tx: Prisma.TransactionClient, companyId: string, status: OnboardingStatus): Promise<void> {
+    await tx.company.update({
+      where: { id: companyId, deletedAt: null },
+      data: { onboardingStatus: status },
+    })
+  }
 
-        const creatorMembership = await tx.companyMembership.create({
-          data: {
-            userId: data.actorId,
-            companyId: company.id,
-            role: data.actorRole,
-          },
-        })
-
-        await tx.auditLog.create({
-          data: {
-            actorId: data.actorId,
-            companyId: company.id,
-            action: 'company.created',
-            entityType: 'Company',
-            entityId: company.id,
-            metadata: {
-              name: company.name,
-              slug: company.slug,
-              actorRole: data.actorRole,
-              sourceCompanyId: data.sourceCompanyId ?? null,
-              creatorMembershipGranted: true,
-            },
-          },
-        })
-
-        return { company, creatorMembership }
-      })
-    } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-        throw new ConflictException(`Company slug "${data.slug}" already exists`)
-      }
-
-      throw error
-    }
+  async findAllActiveIds(): Promise<string[]> {
+    const companies = await this.prisma.company.findMany({
+      where: { isActive: true, deletedAt: null },
+      select: { id: true },
+      orderBy: { createdAt: 'asc' },
+    })
+    return companies.map((c) => c.id)
   }
 }

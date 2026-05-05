@@ -1,16 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common'
-import type { Role } from '@prisma/client'
-import { PrismaService } from '../prisma/prisma.service'
+import type { AuditLog, Role } from '@prisma/client'
+import { AuditRepository } from './audit.repository'
 import type { AuthContextData } from '../common/types'
+import type { CreateAuditLogDto } from './audit.dto'
 
-export interface CreateAuditLogDto {
-  actorId?: string
-  companyId?: string
-  action: string
-  entityType?: string
-  entityId?: string
-  metadata?: Record<string, unknown>
-}
+export type { CreateAuditLogDto }
 
 export interface AuditAuthContextMetadata {
   actorUserId: string
@@ -31,7 +25,7 @@ export interface AuditAuthContextMetadata {
 }
 
 /**
- * AuditService — write-only service for creating immutable audit log entries.
+ * AuditService — audit log operations: writes and scoped reads.
  *
  * Rules:
  * - Never throws on audit failure (log and continue — audit must not block flows)
@@ -42,23 +36,14 @@ export interface AuditAuthContextMetadata {
 export class AuditService {
   private readonly logger = new Logger(AuditService.name)
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(private readonly auditRepository: AuditRepository) {}
 
-  /**
-   * Write an audit log entry.
-   * Call this inside a Prisma transaction for critical operations.
-   */
   async log(dto: CreateAuditLogDto): Promise<void> {
-    await this.prisma.auditLog.create({
-      data: {
-        actorId: dto.actorId ?? null,
-        companyId: dto.companyId ?? null,
-        action: dto.action,
-        entityType: dto.entityType ?? null,
-        entityId: dto.entityId ?? null,
-        metadata: dto.metadata ? (dto.metadata as object) : undefined,
-      },
-    })
+    await this.auditRepository.create(dto)
+  }
+
+  async listByCompanyId(companyId: string, take = 20): Promise<AuditLog[]> {
+    return this.auditRepository.findByCompanyId(companyId, take)
   }
 
   /**
@@ -96,35 +81,11 @@ export class AuditService {
 
     return {
       ...(metadata ?? {}),
-      authContext: this.serializeAuditAuthContext(authContext),
+      authContext,
     }
   }
 
   toAuthContextMetadata(authContext: AuthContextData): AuditAuthContextMetadata {
-    return this.serializeAuditAuthContext({
-      actorUserId: authContext.actorUserId,
-      actorEmail: authContext.actorEmail,
-      actorHasSystemAdminCapability: authContext.actorHasSystemAdminCapability,
-      actorScope: {
-        membershipCompanyIds: [...authContext.actorScope.membershipCompanyIds],
-        realDataCompanyIds: [...authContext.actorScope.realDataCompanyIds],
-      },
-      scopedCompanyId: authContext.scopedCompanyId,
-      effectiveRole: authContext.effectiveRole,
-      realMembershipRole: authContext.realMembershipRole,
-      simulation: authContext.simulation
-        ? {
-            sessionId: authContext.simulation.sessionId,
-            effectiveRole: authContext.simulation.effectiveRole,
-            startedAt: authContext.simulation.startedAt,
-          }
-        : null,
-    })
-  }
-
-  private serializeAuditAuthContext(
-    authContext: AuditAuthContextMetadata,
-  ): AuditAuthContextMetadata {
     return {
       actorUserId: authContext.actorUserId,
       actorEmail: authContext.actorEmail,

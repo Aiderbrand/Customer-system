@@ -96,23 +96,21 @@ export class CompaniesController {
   async create(
     @Body() dto: CreateCompanyDto,
     @CurrentUser() currentUser: JwtPayload,
-    @CompanyContext() sourceCompanyId: string | null,
     @AuthContext() authContext: AuthContextData,
   ): Promise<CreateCompanyResponseDto> {
-    const result = await this.companiesService.create({
+    const company = await this.companiesService.create({
       actorId: currentUser.sub,
       actorRole: authContext.effectiveRole as Role,
-      sourceCompanyId: sourceCompanyId ?? undefined,
       name: dto.name,
       slug: dto.slug,
     })
 
     return {
-      company: this.toCompanyDto(result.company),
+      company: this.toCompanyDto(company),
       creatorMembership: {
-        companyId: result.creatorMembership.companyId,
-        role: result.creatorMembership.role,
-        isActive: result.creatorMembership.isActive,
+        companyId: company.id,
+        role: authContext.effectiveRole as Role,
+        isActive: true,
       },
     }
   }
@@ -124,10 +122,12 @@ export class CompaniesController {
   @RequireRoles(Role.SYSTEM_ADMIN, Role.PROJECT_LEAD, Role.ACCOUNT_OWNER)
   async getDetail(
     @Param('companyId', ParseUUIDPipe) companyId: string,
+    @CurrentUser() currentUser: JwtPayload,
     @AuthContext() authContext: AuthContextData,
   ): Promise<CompanyDetailResponseDto> {
     const result = await this.companiesService.getDetail({
       companyId,
+      actorUserId: currentUser.sub,
       actorRole: authContext.effectiveRole as Role,
     })
 

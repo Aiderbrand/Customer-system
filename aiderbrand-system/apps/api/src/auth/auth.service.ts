@@ -8,6 +8,7 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common'
 import { JwtService } from '@nestjs/jwt'
+import { EventEmitter2 } from '@nestjs/event-emitter'
 import { ConfigService } from '@nestjs/config'
 import { randomBytes, timingSafeEqual } from 'crypto'
 import * as bcrypt from 'bcryptjs'
@@ -17,10 +18,11 @@ import { AuditService } from '../audit/audit.service'
 import { RefreshTokenRepository } from './refresh-token.repository'
 import { PasswordResetRepository } from './password-reset.repository'
 import { InvitationsService } from '../invitations/invitations.service'
-import { InvitationsRepository } from '../invitations/invitations.repository'
 import { PrismaService } from '../prisma/prisma.service'
+import { CompaniesService } from '../companies/companies.service'
 import { RoleSimulationRepository } from './role-simulation.repository'
 import { MailService } from '../mail/mail.service'
+import { PasswordResetRequestedEvent } from './events/password-reset-requested.event'
 import type { JwtPayload } from '../common/types/jwt-payload.type'
 import type { AuthContextData } from '../common/types'
 import type {
@@ -56,10 +58,11 @@ export class AuthService {
     private readonly refreshTokenRepo: RefreshTokenRepository,
     private readonly passwordResetRepo: PasswordResetRepository,
     private readonly invitationsService: InvitationsService,
-    private readonly invitationsRepo: InvitationsRepository,
     private readonly prisma: PrismaService,
+    private readonly companiesService: CompaniesService,
     private readonly roleSimulationRepository: RoleSimulationRepository,
     private readonly mailService: MailService,
+    private readonly eventEmitter: EventEmitter2,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
   ) {}
@@ -95,7 +98,7 @@ export class AuthService {
     const session = await this.getSession(user.id)
 
     // 5. Audit log (fire-and-forget — non-critical)
-    this.auditService.logSafe({
+    void this.auditService.logSafe({
       actorId: user.id,
       action: 'auth.login',
       entityType: 'User',
@@ -105,7 +108,7 @@ export class AuthService {
         membershipCount: session.memberships.length,
         companyIds: session.memberships.map((membership) => membership.companyId),
       },
-    }).catch((err) => this.logger.error('Audit log failed on login', err))
+    })
 
     return {
       response: {
@@ -273,12 +276,12 @@ export class AuthService {
     await this.refreshTokenRepo.revoke(refreshTokenDbId)
 
     // Audit (fire-and-forget)
-    this.auditService.logSafe({
+    void this.auditService.logSafe({
       actorId: userId,
       action: 'auth.logout',
       entityType: 'User',
       entityId: userId,
-    }).catch((err) => this.logger.error('Audit log failed on logout', err))
+    })
   }
 
   /**
@@ -321,7 +324,13 @@ export class AuthService {
 
     // Step 1: Validate token (throws BadRequestException if invalid/expired)
     const invitation = await this.invitationsService.validateToken(rawToken)
-    const tokenHash = this.invitationsRepo.hash(rawToken)
+
+    // Guard: ONBOARDING invitations must go through /onboarding/complete, not this endpoint
+    if (invitation.type === 'ONBOARDING') {
+      throw new BadRequestException('Use /onboarding/complete for onboarding invitations')
+    }
+
+    const tokenHash = this.invitationsService.hash(rawToken)
 
     // Hash password before the transaction
     const BCRYPT_ROUNDS = 10
@@ -336,85 +345,47 @@ export class AuthService {
     const rawRefreshToken = randomBytes(48).toString('hex')
     const refreshTokenHash = this.refreshTokenRepo.hash(rawRefreshToken)
 
-    // Step 2–6: Atomic transaction
+    // Steps 2–6: Atomic transaction — delegates to repositories
     let userId: string
     let userEmail: string
-    let userName: string
-    let userAvatarUrl: string | null
 
     await this.prisma.$transaction(async (tx) => {
-      // 2a. Check for existing user by email
-      const existingUser = await tx.user.findFirst({
-        where: { email: invitation.email, deletedAt: null },
+      // 2. Upsert user
+      const user = await this.usersService.upsertByEmailInTx(tx, {
+        email: invitation.email,
+        name,
+        passwordHash,
       })
-
-      let user: { id: string; email: string; name: string; avatarUrl: string | null }
-
-      if (existingUser) {
-        // 2b. Existing user — update name (in case they want to change it)
-        const updated = await tx.user.update({
-          where: { id: existingUser.id },
-          data: { name, updatedAt: new Date() },
-          select: { id: true, email: true, name: true, avatarUrl: true },
-        })
-        user = updated
-      } else {
-        // 3. New user — create with hashed password
-        const created = await tx.user.create({
-          data: {
-            email: invitation.email,
-            passwordHash,
-            name,
-          },
-          select: { id: true, email: true, name: true, avatarUrl: true },
-        })
-        user = created
-      }
 
       userId = user.id
       userEmail = user.email
-      userName = user.name
-      userAvatarUrl = user.avatarUrl ?? null
 
-      // 4. Upsert membership (idempotent)
-      await tx.companyMembership.upsert({
-        where: {
-          userId_companyId: { userId: user.id, companyId: invitation.companyId },
-        },
-        update: { role: invitation.role, isActive: true, updatedAt: new Date() },
-        create: {
-          userId: user.id,
-          companyId: invitation.companyId,
-          role: invitation.role,
-        },
+      // 3. Upsert membership (idempotent)
+      await this.membershipsService.upsertInTx(tx, {
+        userId: user.id,
+        companyId: invitation.companyId,
+        role: invitation.role,
       })
 
-      // 5. Mark invitation ACCEPTED
-      await tx.invitation.update({
-        where: { tokenHash },
-        data: { status: 'ACCEPTED', acceptedAt: new Date() },
-      })
+      // 4. Mark invitation ACCEPTED
+      await this.invitationsService.acceptByTokenHashInTx(tx, tokenHash)
 
-      // 6. Persist refresh token (hashed)
-      await tx.refreshToken.create({
-        data: {
-          userId: user.id,
-          tokenHash: refreshTokenHash,
-          expiresAt: refreshExpiresAt,
-        },
+      // 5. Persist refresh token
+      await this.refreshTokenRepo.createInTx(tx, {
+        userId: user.id,
+        tokenHash: refreshTokenHash,
+        expiresAt: refreshExpiresAt,
       })
+    })
 
-      // 7. Audit log (inside transaction for strong consistency)
-      await tx.auditLog.create({
-        data: {
-          actorId: user.id,
-          companyId: invitation.companyId,
-          action: 'invitation.accepted',
-          entityType: 'Invitation',
-          entityId: invitation.id,
-          metadata: { email: invitation.email, role: invitation.role },
-        },
-      })
+    // Audit log (fire-and-forget outside transaction)
+    void this.auditService.logSafe({
+      actorId: userId!,
+      companyId: invitation.companyId,
+      action: 'invitation.accepted',
+      entityType: 'Invitation',
+      entityId: invitation.id,
+      metadata: { email: invitation.email, role: invitation.role },
     })
 
     // Fetch memberships for auto-login response (outside transaction — read-only)
@@ -464,44 +435,26 @@ export class AuthService {
     const expiresAt = new Date()
     expiresAt.setHours(expiresAt.getHours() + expiresInHours)
 
-    // 3. Invalidate prior tokens + create new one (atomic in PasswordResetRepository)
-    const { rawToken } = await this.passwordResetRepo.invalidatePriorAndCreate(
-      user.id,
-      expiresAt,
-    )
-    const resetUrl = this.buildResetUrl(rawToken)
-    const delivery = await this.mailService.sendPasswordResetEmail({
-      to: user.email,
-      userName: user.name,
-      resetUrl,
-    })
+    // 3. Invalidate prior tokens + create new one (service generates the raw token)
+    const rawToken = randomBytes(48).toString('hex')
+    await this.passwordResetRepo.invalidateAllUnusedForUser(user.id)
+    await this.passwordResetRepo.createToken(user.id, rawToken, expiresAt)
 
-    // 4. Audit log (fire-and-forget)
-    this.auditService
-      .logSafe({
-        actorId: user.id,
-        action: 'password_reset.requested',
-          entityType: 'User',
-          entityId: user.id,
-          metadata: {
-            email: user.email,
-            delivery: delivery.reason,
-          },
-        })
-      .catch((err) => this.logger.error('Audit log failed on forgotPassword', err))
-
-    await this.auditService.logSafe({
+    // 4. Audit: request event
+    void this.auditService.logSafe({
       actorId: user.id,
-      action: delivery.sent ? 'password_reset.email_sent' : 'password_reset.email_failed',
+      action: 'password_reset.requested',
       entityType: 'User',
       entityId: user.id,
-      metadata: {
-        email: user.email,
-        reason: delivery.reason,
-        attempted: delivery.attempted,
-        errorMessage: delivery.errorMessage ?? null,
-      },
+      metadata: { email: user.email },
     })
+
+    // 5. Emit event for async email delivery (non-blocking)
+    const resetUrl = this.buildResetUrl(rawToken)
+    this.eventEmitter.emit(
+      'password.reset.requested',
+      new PasswordResetRequestedEvent(user.id, user.email, user.name, resetUrl),
+    )
   }
 
   /**
@@ -533,39 +486,23 @@ export class AuthService {
 
     // 3. Atomic transaction: update password + mark token used + revoke all refresh tokens
     await this.prisma.$transaction(async (tx) => {
-      // 3a. Update password
-      await tx.user.update({
-        where: { id: resetRecord.userId },
-        data: { passwordHash, updatedAt: new Date() },
-      })
+      await this.usersService.updatePasswordHashInTx(tx, resetRecord.userId, passwordHash)
+      await this.passwordResetRepo.markUsedByIdInTx(tx, resetRecord.id)
+      await this.refreshTokenRepo.revokeAllForUserInTx(tx, resetRecord.userId)
+    })
 
-      // 3b. Mark token as used
-      await tx.passwordResetToken.update({
-        where: { id: resetRecord.id },
-        data: { usedAt: new Date() },
-      })
-
-      // 3c. Revoke ALL active refresh tokens (invalidate all sessions)
-      await tx.refreshToken.updateMany({
-        where: { userId: resetRecord.userId, revokedAt: null },
-        data: { revokedAt: new Date() },
-      })
-
-      // 3d. Audit log inside transaction (strong consistency for security-critical event)
-      await tx.auditLog.create({
-        data: {
-          actorId: resetRecord.userId,
-          action: 'password.reset',
-          entityType: 'User',
-          entityId: resetRecord.userId,
-          metadata: {
-            tokenId: resetRecord.id,
-            companyIds: memberships
-              .filter((membership) => membership.isActive)
-              .map((membership) => membership.companyId),
-          },
-        },
-      })
+    // 4. Audit (fire-and-forget — outside transaction)
+    void this.auditService.logSafe({
+      actorId: resetRecord.userId,
+      action: 'password.reset',
+      entityType: 'User',
+      entityId: resetRecord.userId,
+      metadata: {
+        tokenId: resetRecord.id,
+        companyIds: memberships
+          .filter((membership) => membership.isActive)
+          .map((membership) => membership.companyId),
+      },
     })
   }
 
@@ -600,36 +537,49 @@ export class AuthService {
     const expiresAt = new Date()
     expiresAt.setHours(expiresAt.getHours() + expiresInHours)
 
-    // 3. Invalidate prior tokens + create new one
-    const { rawToken, record } = await this.passwordResetRepo.invalidatePriorAndCreate(
-      targetUser.id,
-      expiresAt,
-    )
+    // 3. Invalidate prior tokens + create new one (service generates the raw token)
+    const rawToken = randomBytes(48).toString('hex')
+    await this.passwordResetRepo.invalidateAllUnusedForUser(targetUser.id)
+    const { record } = await this.passwordResetRepo.createToken(targetUser.id, rawToken, expiresAt)
 
     // 4. Build reset URL
     const resetUrl = this.buildResetUrl(rawToken)
 
     // 5. Audit log (write directly — admin action must be traceable, but don't need full tx here
     //    since the token is already persisted above; fire-and-forget with structured error logging)
-    this.auditService
-      .logSafe({
-        actorId,
-        companyId,
-        action: 'password_reset_link.generated',
-        entityType: 'User',
-        entityId: targetUser.id,
-        metadata: this.auditService.withAuthContext({
-          targetUserId: targetUser.id,
-          targetEmail: targetUser.email,
-          tokenId: record.id,
-          expiresAt: expiresAt.toISOString(),
-        }, authContext),
-      })
-      .catch((err) =>
-        this.logger.error('Audit log failed on generateAdminResetLink', err),
-      )
+    void this.auditService.logSafe({
+      actorId,
+      companyId,
+      action: 'password_reset_link.generated',
+      entityType: 'User',
+      entityId: targetUser.id,
+      metadata: this.auditService.withAuthContext({
+        targetUserId: targetUser.id,
+        targetEmail: targetUser.email,
+        tokenId: record.id,
+        expiresAt: expiresAt.toISOString(),
+      }, authContext),
+    })
 
     return { resetUrl }
+  }
+
+  /**
+   * Create a full auth session inside an existing transaction (for onboarding flow).
+   * Generates the refresh token, stores it in the tx, and issues the access JWT.
+   * Encapsulates all auth internals so OnboardingService stays out of auth domain.
+   */
+  async createOnboardingSessionInTx(
+    tx: import('@prisma/client').Prisma.TransactionClient,
+    userId: string,
+    userEmail: string,
+    refreshExpiresAt: Date,
+  ): Promise<{ rawRefreshToken: string; accessToken: string }> {
+    const rawRefreshToken = randomBytes(48).toString('hex')
+    const tokenHash = this.refreshTokenRepo.hash(rawRefreshToken)
+    await this.refreshTokenRepo.createInTx(tx, { userId, tokenHash, expiresAt: refreshExpiresAt })
+    const accessToken = this.issueAccessToken(userId, userEmail)
+    return { rawRefreshToken, accessToken }
   }
 
   // ─── Private helpers ────────────────────────────────────────────────────────
@@ -691,29 +641,19 @@ export class AuthService {
   ): Promise<ActorContextDto> {
     const resolvedMemberships = memberships ?? await this.membershipsService.getMembershipsForUser(userId)
 
-    const systemAdminMembership = await this.prisma.companyMembership.findFirst({
-      where: {
-        userId,
-        role: Role.SYSTEM_ADMIN,
-        isActive: true,
-        company: {
-          isActive: true,
-          deletedAt: null,
-        },
-      },
-    })
+    const hasSystemAdminCapability = await this.membershipsService.hasSystemAdminCapability(userId)
 
     const membershipCompanyIds = resolvedMemberships
       .filter((membership) => membership.isActive)
       .map((membership) => membership.companyId)
 
     return {
-      hasSystemAdminCapability: !!systemAdminMembership,
+      hasSystemAdminCapability,
       scope: {
         membershipCompanyIds,
         realDataCompanyIds: await this.resolveRealDataCompanyIds({
           membershipCompanyIds,
-          actorHasSystemAdminCapability: !!systemAdminMembership,
+          actorHasSystemAdminCapability: hasSystemAdminCapability,
         }),
       },
     }
@@ -727,20 +667,7 @@ export class AuthService {
       return params.membershipCompanyIds
     }
 
-    const companies = await this.prisma.company.findMany({
-      where: {
-        isActive: true,
-        deletedAt: null,
-      },
-      select: {
-        id: true,
-      },
-      orderBy: {
-        createdAt: 'asc',
-      },
-    })
-
-    return companies.map((company) => company.id)
+    return this.companiesService.findAllActiveIds()
   }
 
   private async resolveSimulationSummary(

@@ -1,6 +1,78 @@
 import { apiClient } from './client'
 import type { CompanyMembership, Invitation, Role, RoleSimulationSession, User } from '@/lib/types'
 
+// ─── Onboarding types ─────────────────────────────────────────────────────────
+
+export interface OnboardingTokenInfo {
+  email: string
+  companyId: string
+  companyName: string
+}
+
+export interface DecisionMaker {
+  name: string
+  role: string
+  email: string
+}
+
+export interface PrimaryContact {
+  name: string
+  role: string
+  email: string
+  phone?: string
+}
+
+export interface OnboardingFormAnswers {
+  industry: string
+  teamSize: string
+  yearsOperating: string
+  mainPainPoints: string
+  toolsInUse: string[]
+  decisionMakers: DecisionMaker[]
+  primaryContact: PrimaryContact
+  shortTermGoals: string
+  midTermGoals: string
+  successMetrics: string
+  budgetRange?: string
+  startTimeframe?: string
+  notes?: string
+}
+
+export interface TeamInvite {
+  email: string
+  role: string
+}
+
+export interface CompleteOnboardingPayload {
+  token: string
+  name: string
+  password: string
+  formAnswers: OnboardingFormAnswers
+  teamInvites?: TeamInvite[]
+}
+
+export interface OnboardingSubmission {
+  id: string
+  companyId: string
+  industry: string | null
+  teamSize: string | null
+  yearsOperating: string | null
+  mainPainPoints: string | null
+  toolsInUse: string[]
+  decisionMakers: DecisionMaker[]
+  primaryContact: PrimaryContact | null
+  shortTermGoals: string | null
+  midTermGoals: string | null
+  successMetrics: string | null
+  budgetRange: string | null
+  startTimeframe: string | null
+  notes: string | null
+  reviewedAt: Date | null
+  reviewedById: string | null
+  createdAt: Date
+  updatedAt: Date
+}
+
 export interface AuthSession {
   accessToken: string
   user: User
@@ -191,6 +263,22 @@ export const authApi = {
       status: payload.status,
       expiresAt: new Date(payload.expiresAt),
     }
+  },
+
+  async validateOnboardingToken(token: string): Promise<OnboardingTokenInfo> {
+    return apiClient.request<OnboardingTokenInfo>('/onboarding/validate-token', {
+      method: 'POST',
+      body: { token },
+    })
+  },
+
+  async submitOnboarding(payload: CompleteOnboardingPayload): Promise<{ session: AuthSession; projectName: string }> {
+    const { accessToken, projectName } = await apiClient.request<{ accessToken: string; projectName: string }>('/onboarding/complete', {
+      method: 'POST',
+      body: payload as unknown as Record<string, unknown>,
+    })
+    const session = await authApi.getSession(accessToken)
+    return { session, projectName }
   },
 
   async forgotPassword(email: string): Promise<{ message: string }> {

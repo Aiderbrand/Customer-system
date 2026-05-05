@@ -1,48 +1,65 @@
 import {
-  ForbiddenException,
+  BadRequestException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common'
 import type { Priority, TicketStatus } from '@prisma/client'
+import { AuditService } from '../audit/audit.service'
 import { UsersRepository } from '../users/users.repository'
 import { TicketsRepository } from './tickets.repository'
 import type { CommentDto, TicketDto, TicketWithTimelineDto } from './dto/ticket-response.dto'
 
 type UserEntry = { id: string; name: string; email: string }
-type ProjectEntry = { id: string; name: string }
 
 @Injectable()
 export class TicketsService {
+  private readonly logger = new Logger(TicketsService.name)
+
   constructor(
     private readonly ticketsRepository: TicketsRepository,
     private readonly usersRepository: UsersRepository,
+    private readonly auditService: AuditService,
   ) {}
 
+  async countByProjectIds(
+    projectIds: string[],
+    options?: { excludeStatuses?: TicketStatus[] },
+  ): Promise<Map<string, number>> {
+    return this.ticketsRepository.countByProjectIds(projectIds, options)
+  }
+
+  async findSummaryByProjectId(
+    projectId: string,
+  ): Promise<Array<{ id: string; title: string; status: TicketStatus; priority: Priority }>> {
+    return this.ticketsRepository.findSummaryByProjectId(projectId)
+  }
+
   async list(params: {
-    companyIds: string[]
+    accessibleCompanyIds: string[]
+    requestedCompanyIds: string[]
     projectId?: string
     status?: TicketStatus[]
     priority?: Priority[]
     assignedToId?: string
     search?: string
   }): Promise<TicketDto[]> {
-    const tickets = await this.ticketsRepository.findMany(params)
+    const companyIds = params.requestedCompanyIds.length > 0
+      ? params.requestedCompanyIds.filter((id) => params.accessibleCompanyIds.includes(id))
+      : params.accessibleCompanyIds
+
+    const tickets = await this.ticketsRepository.findMany({ ...params, companyIds })
     if (tickets.length === 0) return []
 
     const userIds = unique([
       ...tickets.map((t) => t.assignedToId).filter(Boolean),
       ...tickets.map((t) => t.createdById).filter(Boolean),
     ]) as string[]
-    const projectIds = unique(tickets.map((t) => t.projectId).filter(Boolean)) as string[]
 
-    const [users, projects] = await Promise.all([
-      this.usersRepository.findManyByIds(userIds),
-      this.ticketsRepository.findProjectNames(projectIds),
-    ])
+    const users = await this.usersRepository.findManyByIds(userIds)
     const userMap = new Map(users.map((u) => [u.id, u]))
-    const projectMap = new Map(projects.map((p) => [p.id, p]))
 
-    return tickets.map((ticket) => this.toDto(ticket, userMap, projectMap))
+    return tickets.map((ticket) => this.toDto(ticket, userMap))
   }
 
   async getById(ticketId: string, accessibleCompanyIds: string[]): Promise<TicketWithTimelineDto> {
@@ -58,14 +75,8 @@ export class TicketsService {
       ...ticket.comments.map((c) => c.userId),
     ].filter(Boolean)) as string[]
 
-    const projectIds = ticket.projectId ? [ticket.projectId] : []
-
-    const [users, projects] = await Promise.all([
-      this.usersRepository.findManyByIds(userIds),
-      this.ticketsRepository.findProjectNames(projectIds),
-    ])
+    const users = await this.usersRepository.findManyByIds(userIds)
     const userMap = new Map(users.map((u) => [u.id, u]))
-    const projectMap = new Map(projects.map((p) => [p.id, p]))
 
     const timeline: TicketWithTimelineDto['timeline'] = [
       {
@@ -92,7 +103,7 @@ export class TicketsService {
     ]
 
     return {
-      ...this.toDto(ticket, userMap, projectMap),
+      ...this.toDto(ticket, userMap),
       timeline,
       files: [],
     }
@@ -108,7 +119,7 @@ export class TicketsService {
   }): Promise<TicketDto> {
     const trimmedTitle = params.title.trim()
     if (!trimmedTitle) {
-      throw new Error('Ticket title is required')
+      throw new BadRequestException('Ticket title is required')
     }
 
     const ticket = await this.ticketsRepository.create({
@@ -120,19 +131,25 @@ export class TicketsService {
       createdById: params.actorId,
     })
 
-    const [users, projects] = await Promise.all([
-      params.actorId ? this.usersRepository.findManyByIds([params.actorId]) : Promise.resolve([]),
-      params.projectId ? this.ticketsRepository.findProjectNames([params.projectId]) : Promise.resolve([]),
-    ])
-    const userMap = new Map(users.map((u: UserEntry) => [u.id, u]))
-    const projectMap = new Map(projects.map((p: ProjectEntry) => [p.id, p]))
+    void this.auditService.logSafe({
+      actorId: params.actorId,
+      companyId: params.companyId,
+      action: 'ticket.created',
+      entityType: 'Ticket',
+      entityId: ticket.id,
+      metadata: { title: ticket.title, priority: ticket.priority },
+    })
 
-    return this.toDto(ticket, userMap, projectMap)
+    const users = params.actorId ? await this.usersRepository.findManyByIds([params.actorId]) : []
+    const userMap = new Map(users.map((u: UserEntry) => [u.id, u]))
+
+    return this.toDto(ticket, userMap)
   }
 
   async update(
     ticketId: string,
     accessibleCompanyIds: string[],
+    actorId: string,
     data: {
       title?: string
       description?: string
@@ -146,15 +163,21 @@ export class TicketsService {
     }
 
     const updated = await this.ticketsRepository.update(ticketId, data)
-    const [users, projects] = await Promise.all([
-      this.usersRepository.findManyByIds(
-        [updated.assignedToId, updated.createdById].filter(Boolean) as string[],
-      ),
-      updated.projectId ? this.ticketsRepository.findProjectNames([updated.projectId]) : Promise.resolve([]),
-    ])
+
+    void this.auditService.logSafe({
+      actorId,
+      companyId: existing.companyId,
+      action: 'ticket.updated',
+      entityType: 'Ticket',
+      entityId: ticketId,
+      metadata: { updatedFields: Object.keys(data).filter((k) => data[k as keyof typeof data] !== undefined) },
+    })
+
+    const users = await this.usersRepository.findManyByIds(
+      [updated.assignedToId, updated.createdById].filter(Boolean) as string[],
+    )
     const userMap = new Map(users.map((u: UserEntry) => [u.id, u]))
-    const projectMap = new Map(projects.map((p: ProjectEntry) => [p.id, p]))
-    return this.toDto(updated, userMap, projectMap)
+    return this.toDto(updated, userMap)
   }
 
   async changeStatus(
@@ -168,27 +191,29 @@ export class TicketsService {
       throw new NotFoundException(`Ticket ${ticketId} not found`)
     }
 
-    const ticket = await this.ticketsRepository.changeStatus(
-      ticketId,
-      newStatus,
-      changedById,
-      existing.companyId,
-      existing.status,
+    const previousStatus = existing.status
+    const ticket = await this.ticketsRepository.changeStatus(ticketId, newStatus)
+
+    void this.auditService.logSafe({
+      actorId: changedById,
+      companyId: existing.companyId,
+      action: 'ticket.status_changed',
+      entityType: 'Ticket',
+      entityId: ticketId,
+      metadata: { from: previousStatus, to: newStatus },
+    })
+
+    const users = await this.usersRepository.findManyByIds(
+      [ticket.assignedToId, ticket.createdById].filter(Boolean) as string[],
     )
-    const [users, projects] = await Promise.all([
-      this.usersRepository.findManyByIds(
-        [ticket.assignedToId, ticket.createdById].filter(Boolean) as string[],
-      ),
-      ticket.projectId ? this.ticketsRepository.findProjectNames([ticket.projectId]) : Promise.resolve([]),
-    ])
     const userMap = new Map(users.map((u: UserEntry) => [u.id, u]))
-    const projectMap = new Map(projects.map((p: ProjectEntry) => [p.id, p]))
-    return this.toDto(ticket, userMap, projectMap)
+    return this.toDto(ticket, userMap)
   }
 
   async assignTicket(
     ticketId: string,
     assigneeId: string,
+    actorId: string,
     accessibleCompanyIds: string[],
   ): Promise<TicketDto> {
     const existing = await this.ticketsRepository.findById(ticketId, accessibleCompanyIds)
@@ -197,15 +222,21 @@ export class TicketsService {
     }
 
     const ticket = await this.ticketsRepository.assignTicket(ticketId, assigneeId)
-    const [users, projects] = await Promise.all([
-      this.usersRepository.findManyByIds(
-        [ticket.assignedToId, ticket.createdById].filter(Boolean) as string[],
-      ),
-      ticket.projectId ? this.ticketsRepository.findProjectNames([ticket.projectId]) : Promise.resolve([]),
-    ])
+
+    void this.auditService.logSafe({
+      actorId,
+      companyId: existing.companyId,
+      action: 'ticket.assigned',
+      entityType: 'Ticket',
+      entityId: ticketId,
+      metadata: { assigneeId },
+    })
+
+    const users = await this.usersRepository.findManyByIds(
+      [ticket.assignedToId, ticket.createdById].filter(Boolean) as string[],
+    )
     const userMap = new Map(users.map((u: UserEntry) => [u.id, u]))
-    const projectMap = new Map(projects.map((p: ProjectEntry) => [p.id, p]))
-    return this.toDto(ticket, userMap, projectMap)
+    return this.toDto(ticket, userMap)
   }
 
   async addComment(
@@ -221,6 +252,16 @@ export class TicketsService {
     }
 
     const comment = await this.ticketsRepository.addComment({ ticketId, userId, content, type })
+
+    void this.auditService.logSafe({
+      actorId: userId,
+      companyId: existing.companyId,
+      action: 'ticket.comment.added',
+      entityType: 'Ticket',
+      entityId: ticketId,
+      metadata: { type },
+    })
+
     const [user] = await this.usersRepository.findManyByIds([userId])
 
     return {
@@ -252,13 +293,12 @@ export class TicketsService {
       updatedAt: Date
     },
     userMap: Map<string, UserEntry> = new Map(),
-    projectMap: Map<string, ProjectEntry> = new Map(),
   ): TicketDto {
     return {
       id: ticket.id,
       companyId: ticket.companyId,
       projectId: ticket.projectId,
-      projectName: ticket.projectId ? (projectMap.get(ticket.projectId)?.name ?? null) : null,
+      projectName: null,
       title: ticket.title,
       description: ticket.description,
       status: ticket.status,

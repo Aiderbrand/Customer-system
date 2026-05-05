@@ -1,27 +1,33 @@
 import {
+  Inject,
   Injectable,
   Logger,
   ConflictException,
   NotFoundException,
   ForbiddenException,
   BadRequestException,
+  forwardRef,
 } from '@nestjs/common'
+import { EventEmitter2 } from '@nestjs/event-emitter'
 import { ConfigService } from '@nestjs/config'
-import { timingSafeEqual } from 'crypto'
+import { randomBytes, timingSafeEqual } from 'crypto'
 import { InvitationsRepository } from './invitations.repository'
 import { MembershipsService } from '../memberships/memberships.service'
 import { AuditService } from '../audit/audit.service'
-import { MailService, type MailDeliveryResult } from '../mail/mail.service'
 import { INVITE_CAPABLE_ROLES } from '../common/enums/role.enum'
 import { Role as LocalRole } from '../common/enums/role.enum'
-import type { Role, Invitation } from '@prisma/client'
-import { PrismaService } from '../prisma/prisma.service'
+import { OnboardingStatus, Role, type Invitation, type InvitationType, type Prisma } from '@prisma/client'
+import { CompaniesService } from '../companies/companies.service'
+import { UsersService } from '../users/users.service'
+import { InvitationCreatedEvent } from './events/invitation-created.event'
 
 export interface CreateInvitationResult {
   invitation: Invitation
   rawToken: string
   inviteUrl: string
-  delivery: MailDeliveryResult
+  publicInviteUrl: string
+  manualShareRequired: boolean
+  delivery: { attempted: boolean; sent: boolean; reason: 'sent' | 'disabled' | 'failed' | 'email_queued'; manualShareRequired: boolean }
 }
 
 /**
@@ -41,19 +47,22 @@ export class InvitationsService {
     private readonly invitationsRepo: InvitationsRepository,
     private readonly membershipsService: MembershipsService,
     private readonly auditService: AuditService,
-    private readonly mailService: MailService,
+    private readonly eventEmitter: EventEmitter2,
     private readonly configService: ConfigService,
-    private readonly prisma: PrismaService,
+    @Inject(forwardRef(() => CompaniesService))
+    private readonly companiesService: CompaniesService,
+    private readonly usersService: UsersService,
   ) {}
 
   /**
    * Create a new PENDING invitation.
    *
-   * @param actorId      - The user creating the invitation
-   * @param actorRole    - The actor's role in the company (set by CompanyMembershipGuard)
-   * @param companyId    - Target company (from X-Company-Id header)
-   * @param email        - Email of the invitee
-   * @param role         - Role to assign upon acceptance
+   * @param actorId        - The user creating the invitation
+   * @param actorRole      - The actor's role in the company (set by CompanyMembershipGuard)
+   * @param companyId      - Target company (from X-Company-Id header)
+   * @param email          - Email of the invitee
+   * @param role           - Role to assign upon acceptance
+   * @param withOnboarding - If true, creates an ONBOARDING invitation instead of MEMBER
    */
   async create(params: {
     actorId: string
@@ -61,8 +70,9 @@ export class InvitationsService {
     companyId: string
     email: string
     role: Role
+    withOnboarding?: boolean
   }): Promise<CreateInvitationResult> {
-    const { actorId, actorRole, companyId, email, role } = params
+    const { actorId, actorRole, companyId, email, role, withOnboarding } = params
 
     // 1. Check actor has invite permission
     if (!INVITE_CAPABLE_ROLES.includes(actorRole as unknown as LocalRole)) {
@@ -71,13 +81,18 @@ export class InvitationsService {
       )
     }
 
-    // 2. Validate role hierarchy (cannot invite higher than self)
+    // 2. Guard: ACCOUNT_OWNER cannot create onboarding invitations
+    if (withOnboarding && actorRole === Role.ACCOUNT_OWNER) {
+      throw new ForbiddenException('ACCOUNT_OWNER cannot create onboarding invitations')
+    }
+
+    // 3. Validate role hierarchy (cannot invite higher than self)
     this.membershipsService.validateInvitePermission(
       actorRole as unknown as LocalRole,
       role as unknown as LocalRole,
     )
 
-    // 3. Check for existing pending invitation (no duplicate pending invites)
+    // 4. Check for existing pending invitation (no duplicate pending invites)
     const existing = await this.invitationsRepo.findPendingByEmailAndCompany(email, companyId)
     if (existing) {
       throw new ConflictException(
@@ -85,13 +100,17 @@ export class InvitationsService {
       )
     }
 
-    // 4. Generate opaque token
-    const { rawToken, tokenHash } = this.invitationsRepo.generateToken()
+    // 5. Generate opaque token (service responsibility)
+    const rawToken = randomBytes(48).toString('hex')
+    const tokenHash = this.invitationsRepo.hash(rawToken)
 
-    // 5. Resolve expiry from config (default: 7d)
+    // 6. Resolve expiry from config (default: 7d)
     const expiresAt = this.resolveExpiryDate()
 
-    // 6. Create invitation record
+    // 7. Resolve invitation type
+    const invitationType: InvitationType = withOnboarding ? 'ONBOARDING' : 'MEMBER'
+
+    // 8. Create invitation record
     const invitation = await this.invitationsRepo.create({
       companyId,
       email,
@@ -99,44 +118,65 @@ export class InvitationsService {
       tokenHash,
       expiresAt,
       createdById: actorId,
+      type: invitationType,
     })
 
-    const inviteUrl = this.buildInviteUrl(rawToken)
-    const company = await this.prisma.company.findUnique({
-      where: { id: companyId },
-      select: { name: true },
-    })
-    const inviter = await this.prisma.user.findUnique({
-      where: { id: actorId },
-      select: { name: true },
-    })
-    const delivery = await this.mailService.sendInvitationEmail({
-      to: email,
-      companyName: company?.name ?? 'Aiderbrand',
-      inviterName: inviter?.name ?? null,
-      roleLabel: this.formatRoleLabel(role),
-      inviteUrl,
-    })
+    // 9. If ONBOARDING — update Company.onboardingStatus = invited
+    if (invitationType === 'ONBOARDING') {
+      await this.companiesService.setOnboardingStatus(companyId, OnboardingStatus.invited)
+    }
 
-    await this.auditInvitationDelivery({
-      actorId,
-      companyId,
-      invitationId: invitation.id,
-      email,
-      role,
-      delivery,
-    })
+    const inviteUrl = this.buildInviteUrlForType(rawToken, invitationType)
+    const company = await this.companiesService.findByIdOrThrow(companyId)
+    const inviter = await this.usersService.findById(actorId)
 
+    // 10. Emit event for async email delivery (non-blocking)
+    this.eventEmitter.emit(
+      'invitation.created',
+      new InvitationCreatedEvent(
+        invitationType,
+        email,
+        company.name,
+        inviteUrl,
+        inviter?.name ?? null,
+        this.formatRoleLabel(role),
+        actorId,
+        companyId,
+        invitation.id,
+        role,
+      ),
+    )
+
+    // 11. Audit invitation.created (base event)
     this.auditService.logSafe({
       actorId,
       companyId,
       action: 'invitation.created',
       entityType: 'Invitation',
       entityId: invitation.id,
-      metadata: { email, role },
+      metadata: { email, role, type: invitationType },
     }).catch((err) => this.logger.error('Audit log failed on invitation.created', err))
 
-    return { invitation, rawToken, inviteUrl, delivery }
+    // 12. If ONBOARDING — emit additional audit event
+    if (invitationType === 'ONBOARDING') {
+      this.auditService.logSafe({
+        actorId,
+        companyId,
+        action: 'invitation.created.onboarding',
+        entityType: 'Invitation',
+        entityId: invitation.id,
+        metadata: { email, role, companyId },
+      }).catch((err) => this.logger.error('Audit log failed on invitation.created.onboarding', err))
+    }
+
+    return {
+      invitation,
+      rawToken,
+      inviteUrl,
+      publicInviteUrl: inviteUrl,
+      manualShareRequired: false,
+      delivery: { attempted: true, sent: false, reason: 'email_queued', manualShareRequired: false },
+    }
   }
 
   /**
@@ -215,17 +255,28 @@ export class InvitationsService {
   /**
    * Validate an invitation token.
    * Returns the invitation if valid (PENDING + not expired).
-   * Used by the accept-invitation endpoint to pre-validate before the transaction.
+   * Lazily marks the token EXPIRED in the DB if it has passed its expiry date.
    */
   async validateToken(rawToken: string): Promise<Invitation> {
     const tokenHash = this.invitationsRepo.hash(rawToken)
-    const invitation = await this.invitationsRepo.findValidByTokenHash(tokenHash)
 
-    if (!invitation || !this.hashesMatch(tokenHash, invitation.tokenHash)) {
+    // Check raw record first to detect expired-but-still-PENDING tokens
+    const raw = await this.invitationsRepo.findByTokenHash(tokenHash)
+
+    if (!raw) {
       throw new BadRequestException('Invitation token is invalid, expired, or already used')
     }
 
-    return invitation
+    if (raw.status === 'PENDING' && raw.expiresAt <= new Date()) {
+      void this.invitationsRepo.expireById(raw.id).catch(() => {})
+      throw new BadRequestException('Invitation token is invalid, expired, or already used')
+    }
+
+    if (raw.status !== 'PENDING' || !this.hashesMatch(tokenHash, raw.tokenHash)) {
+      throw new BadRequestException('Invitation token is invalid, expired, or already used')
+    }
+
+    return raw
   }
 
   /**
@@ -252,38 +303,30 @@ export class InvitationsService {
     return timingSafeEqual(Buffer.from(left), Buffer.from(right))
   }
 
-  private buildInviteUrl(rawToken: string): string {
+  private buildInviteUrlForType(rawToken: string, type: InvitationType): string {
     const frontendUrl = this.configService.get<string>('app.frontendUrl') ?? 'http://localhost:3000'
-    return `${frontendUrl}/invite/${rawToken}`
+    const path = type === 'ONBOARDING' ? 'onboarding' : 'invite'
+    return `${frontendUrl}/${path}/${rawToken}`
+  }
+
+  hash(rawToken: string): string {
+    return this.invitationsRepo.hash(rawToken)
+  }
+
+  async findByIdInTx(tx: Prisma.TransactionClient, id: string): Promise<Invitation | null> {
+    return this.invitationsRepo.findByIdInTx(tx, id)
+  }
+
+  async acceptInTx(tx: Prisma.TransactionClient, id: string): Promise<void> {
+    return this.invitationsRepo.acceptInTx(tx, id)
+  }
+
+  async acceptByTokenHashInTx(tx: Prisma.TransactionClient, tokenHash: string): Promise<void> {
+    return this.invitationsRepo.acceptByTokenHashInTx(tx, tokenHash)
   }
 
   private formatRoleLabel(role: Role): string {
     return role.toLowerCase().split('_').map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1)).join(' ')
   }
 
-  private async auditInvitationDelivery(params: {
-    actorId: string
-    companyId: string
-    invitationId: string
-    email: string
-    role: Role
-    delivery: MailDeliveryResult
-  }): Promise<void> {
-    const action = params.delivery.sent ? 'invitation.email_sent' : 'invitation.email_failed'
-
-    await this.auditService.logSafe({
-      actorId: params.actorId,
-      companyId: params.companyId,
-      action,
-      entityType: 'Invitation',
-      entityId: params.invitationId,
-      metadata: {
-        email: params.email,
-        role: params.role,
-        reason: params.delivery.reason,
-        attempted: params.delivery.attempted,
-        errorMessage: params.delivery.errorMessage ?? null,
-      },
-    })
-  }
 }

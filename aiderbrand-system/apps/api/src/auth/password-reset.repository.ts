@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
-import { createHash, randomBytes } from 'crypto'
-import type { PasswordResetToken } from '@prisma/client'
+import type { PasswordResetToken, Prisma } from '@prisma/client'
+import { hashToken } from '../common/utils/crypto'
 
 /**
  * PasswordResetRepository — manages the lifecycle of password reset tokens.
@@ -18,40 +18,28 @@ import type { PasswordResetToken } from '@prisma/client'
 export class PasswordResetRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Hash an opaque token with SHA-256 for DB storage */
   hash(rawToken: string): string {
-    return createHash('sha256').update(rawToken).digest('hex')
+    return hashToken(rawToken)
   }
 
-  /** Generate a new opaque reset token (raw, 48 bytes = 96 hex chars) */
-  generate(): string {
-    return randomBytes(48).toString('hex')
-  }
-
-  /**
-   * Invalidate all existing (unused) tokens for a user, then create a new one.
-   * This ensures only the latest token is valid — no stale tokens floating around.
-   *
-   * Returns { rawToken, record } so the service can embed the raw token in a URL.
-   */
-  async invalidatePriorAndCreate(
-    userId: string,
-    expiresAt: Date,
-  ): Promise<{ rawToken: string; record: PasswordResetToken }> {
-    // Invalidate any prior unused tokens (mark as used immediately)
+  /** Invalidate all unused tokens for a user (mark as used). Call before createToken. */
+  async invalidateAllUnusedForUser(userId: string): Promise<void> {
     await this.prisma.passwordResetToken.updateMany({
       where: { userId, usedAt: null },
       data: { usedAt: new Date() },
     })
+  }
 
-    // Generate fresh token
-    const rawToken = this.generate()
+  /** Create a reset token record from a caller-supplied raw token. Returns DB record. */
+  async createToken(
+    userId: string,
+    rawToken: string,
+    expiresAt: Date,
+  ): Promise<{ rawToken: string; record: PasswordResetToken }> {
     const tokenHash = this.hash(rawToken)
-
     const record = await this.prisma.passwordResetToken.create({
       data: { userId, tokenHash, expiresAt },
     })
-
     return { rawToken, record }
   }
 
@@ -72,6 +60,14 @@ export class PasswordResetRepository {
   /** Mark a token as used (one-time use enforcement) */
   async markUsed(id: string): Promise<void> {
     await this.prisma.passwordResetToken.update({
+      where: { id },
+      data: { usedAt: new Date() },
+    })
+  }
+
+  /** Mark a token as used inside an existing transaction */
+  async markUsedByIdInTx(tx: Prisma.TransactionClient, id: string): Promise<void> {
+    await tx.passwordResetToken.update({
       where: { id },
       data: { usedAt: new Date() },
     })

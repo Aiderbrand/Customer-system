@@ -2,11 +2,15 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common'
-import type { Phase, Task, TaskChecklistItem } from '@prisma/client'
+import { PhaseStatus, Priority, ProjectStatus, TaskStatus, TicketStatus } from '@prisma/client'
+import type { Phase, Prisma, Project, Task, TaskChecklistItem } from '@prisma/client'
 import { Role } from '../common/enums/role.enum'
+import { AuditService } from '../audit/audit.service'
 import { UsersRepository } from '../users/users.repository'
+import { TicketsService } from '../tickets/tickets.service'
 import { ProjectsRepository } from './projects.repository'
 import type {
   PhaseSummaryDto,
@@ -22,6 +26,8 @@ import type {
 import type { CreatePhaseDto } from './dto/create-phase.dto'
 import type { UpdatePhaseDto } from './dto/update-phase.dto'
 import type { CreateNoteDto } from './dto/create-note.dto'
+import type { CreateTaskDto } from './dto/create-task.dto'
+import type { UpdateTaskDto } from './dto/update-task.dto'
 
 const INTERNAL_ROLES = new Set<Role>([
   Role.SYSTEM_ADMIN,
@@ -31,14 +37,24 @@ const INTERNAL_ROLES = new Set<Role>([
 
 const PROJECT_CREATOR_ROLES = new Set<Role>([Role.SYSTEM_ADMIN, Role.PROJECT_LEAD])
 
+const DEFAULT_PHASE_NAMES = ['Kick-off', 'Diseño', 'Desarrollo', 'Testing', 'Lanzamiento']
+
 type TaskWithChecklist = Task & { checklist: TaskChecklistItem[] }
 
 @Injectable()
 export class ProjectsService {
+  private readonly logger = new Logger(ProjectsService.name)
+
   constructor(
     private readonly projectsRepository: ProjectsRepository,
+    private readonly ticketsService: TicketsService,
     private readonly usersRepository: UsersRepository,
+    private readonly auditService: AuditService,
   ) {}
+
+  async findNamesByIds(ids: string[]): Promise<Array<{ id: string; name: string }>> {
+    return this.projectsRepository.findNamesByIds(ids)
+  }
 
   async getHub(params: {
     actorRole: Role
@@ -52,10 +68,16 @@ export class ProjectsService {
     )
 
     if (scopedIds.length === 0) {
-      return this.emptyHub(audience, params.actorRole)
+      return this.emptyHub(audience)
     }
 
     const projects = await this.projectsRepository.findManyByCompanyIds(scopedIds)
+    const projectIds = projects.map((p) => p.id)
+
+    const [totalCountMap, openCountMap] = await Promise.all([
+      this.ticketsService.countByProjectIds(projectIds),
+      this.ticketsService.countByProjectIds(projectIds, { excludeStatuses: [TicketStatus.cerrado] }),
+    ])
 
     const items: ProjectHubItemDto[] = projects.map((project) => {
       const visiblePhases = this.getVisiblePhases(project.phases, audience)
@@ -75,8 +97,8 @@ export class ProjectsService {
         targetLaunchAt: project.targetLaunchAt?.toISOString() ?? null,
         updatedAt: project.updatedAt.toISOString(),
         createdAt: project.createdAt.toISOString(),
-        ticketCount: project._count.tickets,
-        openTicketCount: project.openTicketCount,
+        ticketCount: totalCountMap.get(project.id) ?? 0,
+        openTicketCount: openCountMap.get(project.id) ?? 0,
         nextMilestone: this.resolveNextMilestone(visiblePhases),
         health,
         phases: visiblePhases.map((phase) => this.toPhaseSummaryDto(phase)),
@@ -86,9 +108,9 @@ export class ProjectsService {
     const summary = {
       totalProjects: items.length,
       activeProjects: items.filter(
-        (item) => item.status !== 'finalizado' && item.status !== 'pausado',
+        (item) => item.status !== ProjectStatus.finalizado && item.status !== ProjectStatus.pausado,
       ).length,
-      pausedProjects: items.filter((item) => item.status === 'pausado').length,
+      pausedProjects: items.filter((item) => item.status === ProjectStatus.pausado).length,
       projectsWithOpenTickets: items.filter((item) => item.openTicketCount > 0).length,
       projectsAtRisk: audience === 'internal'
         ? items.filter((item) => item.health === 'at-risk' || item.health === 'breached').length
@@ -117,8 +139,9 @@ export class ProjectsService {
     const visiblePhases = this.getVisiblePhases(project.phases, audience)
     const visibleTasks = this.getVisibleTasks(project.tasks, audience)
     const health = audience === 'internal' ? this.computeHealth(project.tasks) : null
-    const [projectTickets, notes] = await Promise.all([
-      this.projectsRepository.findTicketsForProject(params.projectId),
+    const [openCountMap, projectTickets, notes] = await Promise.all([
+      this.ticketsService.countByProjectIds([params.projectId], { excludeStatuses: [TicketStatus.cerrado] }),
+      this.ticketsService.findSummaryByProjectId(params.projectId),
       audience === 'internal' ? this.projectsRepository.findNotesForProject(params.projectId) : Promise.resolve([]),
     ])
 
@@ -147,7 +170,7 @@ export class ProjectsService {
     }
 
     const summary = {
-      openTickets: project.openTicketCount,
+      openTickets: openCountMap.get(params.projectId) ?? 0,
       visiblePhases: visiblePhases.length,
       nextMilestone: this.resolveNextMilestone(visiblePhases),
       health,
@@ -215,18 +238,38 @@ export class ProjectsService {
       throw new BadRequestException('Project name is required')
     }
 
-    return this.projectsRepository.create({
+    const phases = DEFAULT_PHASE_NAMES.map((name, index) => ({
+      name,
+      order: index + 1,
+      isClientVisible: true,
+    }))
+
+    const project = await this.projectsRepository.create({
       companyId: params.companyId,
       name: trimmedName,
       description: params.description?.trim() ?? '',
-      actorId: params.actorId,
+      phases,
     })
+
+    this.auditService
+      .logSafe({
+        actorId: params.actorId,
+        companyId: params.companyId,
+        action: 'project.created',
+        entityType: 'Project',
+        entityId: project.id,
+        metadata: { name: trimmedName },
+      })
+      .catch((err) => this.logger.error('Audit log failed on project.created', err))
+
+    return project
   }
 
   // ─── Phase Management ─────────────────────────────────────────────────────────
 
   async createPhase(params: {
     projectId: string
+    actorId: string
     actorRole: Role
     accessibleCompanyIds: string[]
     dto: CreatePhaseDto
@@ -257,12 +300,24 @@ export class ProjectsService {
       isClientVisible: params.dto.isClientVisible ?? true,
     })
 
+    this.auditService
+      .logSafe({
+        actorId: params.actorId,
+        companyId: project.companyId,
+        action: 'project.phase.created',
+        entityType: 'Phase',
+        entityId: phase.id,
+        metadata: { projectId: params.projectId, name: phase.name, order: phase.order },
+      })
+      .catch((err) => this.logger.error('Audit log failed on project.phase.created', err))
+
     return this.toPhaseSummaryDto(phase)
   }
 
   async updatePhase(params: {
     projectId: string
     phaseId: string
+    actorId: string
     actorRole: Role
     accessibleCompanyIds: string[]
     dto: UpdatePhaseDto
@@ -295,12 +350,27 @@ export class ProjectsService {
       isClientVisible: params.dto.isClientVisible,
     })
 
+    this.auditService
+      .logSafe({
+        actorId: params.actorId,
+        companyId: project.companyId,
+        action: 'project.phase.updated',
+        entityType: 'Phase',
+        entityId: params.phaseId,
+        metadata: {
+          projectId: params.projectId,
+          updatedFields: Object.keys(params.dto).filter((k) => params.dto[k as keyof typeof params.dto] !== undefined),
+        },
+      })
+      .catch((err) => this.logger.error('Audit log failed on project.phase.updated', err))
+
     return this.toPhaseSummaryDto(updated)
   }
 
   async deletePhase(params: {
     projectId: string
     phaseId: string
+    actorId: string
     actorRole: Role
     accessibleCompanyIds: string[]
   }): Promise<void> {
@@ -323,6 +393,17 @@ export class ProjectsService {
     }
 
     await this.projectsRepository.deletePhase(params.phaseId)
+
+    this.auditService
+      .logSafe({
+        actorId: params.actorId,
+        companyId: project.companyId,
+        action: 'project.phase.deleted',
+        entityType: 'Phase',
+        entityId: params.phaseId,
+        metadata: { projectId: params.projectId, name: phase.name },
+      })
+      .catch((err) => this.logger.error('Audit log failed on project.phase.deleted', err))
   }
 
   async createNote(params: {
@@ -353,6 +434,15 @@ export class ProjectsService {
       parentId: params.dto.parentId ?? null,
     })
 
+    void this.auditService.logSafe({
+      actorId: params.actorId,
+      companyId: project.companyId,
+      action: 'project.note.created',
+      entityType: 'Project',
+      entityId: params.projectId,
+      metadata: { phaseId: params.dto.phaseId ?? null },
+    })
+
     const [author] = await this.usersRepository.findManyByIds([params.actorId])
 
     return {
@@ -370,6 +460,7 @@ export class ProjectsService {
 
   async reorderPhases(params: {
     projectId: string
+    actorId: string
     actorRole: Role
     accessibleCompanyIds: string[]
     orderedIds: string[]
@@ -388,6 +479,17 @@ export class ProjectsService {
     }
 
     await this.projectsRepository.reorderPhases(params.projectId, params.orderedIds)
+
+    this.auditService
+      .logSafe({
+        actorId: params.actorId,
+        companyId: project.companyId,
+        action: 'project.phase.reordered',
+        entityType: 'Project',
+        entityId: params.projectId,
+        metadata: { orderedIds: params.orderedIds },
+      })
+      .catch((err) => this.logger.error('Audit log failed on project.phase.reordered', err))
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -402,7 +504,7 @@ export class ProjectsService {
     return requested.filter((id) => accessibleSet.has(id))
   }
 
-  private emptyHub(audience: ProjectAudience, role: Role): ProjectHubResponseDto {
+  private emptyHub(audience: ProjectAudience): ProjectHubResponseDto {
     return {
       audience,
       summary: {
@@ -434,20 +536,20 @@ export class ProjectsService {
 
   private resolveCurrentPhase(phases: Phase[]): string | null {
     const active = phases.find(
-      (phase) => phase.status !== 'completada' && phase.status !== 'planificacion',
+      (phase) => phase.status !== PhaseStatus.completada && phase.status !== PhaseStatus.planificacion,
     )
-    return active?.name ?? phases.find((phase) => phase.status !== 'completada')?.name ?? null
+    return active?.name ?? phases.find((phase) => phase.status !== PhaseStatus.completada)?.name ?? null
   }
 
   private resolveProgressPct(phases: Phase[]): number | null {
     if (phases.length === 0) return null
-    const completed = phases.filter((phase) => phase.status === 'completada').length
+    const completed = phases.filter((phase) => phase.status === PhaseStatus.completada).length
     return Math.round((completed / phases.length) * 100)
   }
 
   private resolveNextMilestone(phases: Phase[]): string | null {
     const future = phases.find(
-      (phase) => phase.milestone && phase.status !== 'completada',
+      (phase) => phase.milestone && phase.status !== PhaseStatus.completada,
     )
     return future?.milestone ?? null
   }
@@ -455,13 +557,13 @@ export class ProjectsService {
   private computeHealth(tasks: TaskWithChecklist[]): ProjectHealthStatus | null {
     const now = new Date()
     const openTimedTasks = tasks.filter(
-      (task) => !task.deletedAt && task.status !== 'completada' && task.dueAt !== null,
+      (task) => !task.deletedAt && task.status !== TaskStatus.completada && task.dueAt !== null,
     )
 
     if (openTimedTasks.length === 0) return null
 
     const hasBreached = openTimedTasks.some(
-      (task) => task.dueAt! < now && task.status === 'bloqueada',
+      (task) => task.dueAt! < now && task.status === TaskStatus.bloqueada,
     )
     if (hasBreached) return 'breached'
 
@@ -530,10 +632,193 @@ export class ProjectsService {
     now: Date,
   ): 'on-track' | 'at-risk' | 'breached' | 'no-deadline' {
     if (!dueAt) return 'no-deadline'
-    if (status === 'completada') return 'on-track'
+    if (status === TaskStatus.completada) return 'on-track'
     if (dueAt < now) return 'breached'
     const atRiskDate = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000)
     if (dueAt <= atRiskDate) return 'at-risk'
     return 'on-track'
+  }
+
+  // ─── Task CRUD ────────────────────────────────────────────────────────────────
+
+  async createTask(params: {
+    projectId: string
+    actorId: string
+    actorRole: Role
+    accessibleCompanyIds: string[]
+    dto: CreateTaskDto
+  }): Promise<TaskSummaryDto> {
+    if (!INTERNAL_ROLES.has(params.actorRole)) {
+      throw new ForbiddenException('Solo el equipo interno puede crear tareas')
+    }
+    const project = await this.projectsRepository.findByIdWithStats(
+      params.projectId,
+      params.accessibleCompanyIds,
+    )
+    if (!project) {
+      throw new NotFoundException(`Project ${params.projectId} not found`)
+    }
+    const task = await this.projectsRepository.createTask({
+      projectId: params.projectId,
+      companyId: project.companyId,
+      phaseId: params.dto.phaseId ?? null,
+      title: params.dto.title.trim(),
+      priority: params.dto.priority,
+      assigneeUserId: params.dto.assigneeUserId ?? null,
+      dueAt: params.dto.dueAt ?? null,
+      visibleToClient: params.dto.visibleToClient ?? false,
+    })
+    this.auditService
+      .logSafe({
+        actorId: params.actorId,
+        companyId: project.companyId,
+        action: 'project.task.created',
+        entityType: 'Task',
+        entityId: task.id,
+        metadata: { projectId: params.projectId, title: task.title, priority: task.priority },
+      })
+      .catch((err) => this.logger.error('Audit log failed on project.task.created', err))
+    return this.toTaskSummaryDto(task)
+  }
+
+  async updateTask(params: {
+    projectId: string
+    taskId: string
+    actorId: string
+    actorRole: Role
+    accessibleCompanyIds: string[]
+    dto: UpdateTaskDto
+  }): Promise<TaskSummaryDto> {
+    if (!INTERNAL_ROLES.has(params.actorRole)) {
+      throw new ForbiddenException('Solo el equipo interno puede editar tareas')
+    }
+    const project = await this.projectsRepository.findByIdWithStats(
+      params.projectId,
+      params.accessibleCompanyIds,
+    )
+    if (!project) {
+      throw new NotFoundException(`Project ${params.projectId} not found`)
+    }
+    const task = project.tasks.find((t) => t.id === params.taskId)
+    if (!task) {
+      throw new NotFoundException(`Task ${params.taskId} not found`)
+    }
+    const updated = await this.projectsRepository.updateTask(params.taskId, {
+      title: params.dto.title,
+      status: params.dto.status,
+      priority: params.dto.priority,
+      phaseId: params.dto.phaseId,
+      assigneeUserId: params.dto.assigneeUserId,
+      dueAt: params.dto.dueAt,
+      visibleToClient: params.dto.visibleToClient,
+    })
+    this.auditService
+      .logSafe({
+        actorId: params.actorId,
+        companyId: project.companyId,
+        action: 'project.task.updated',
+        entityType: 'Task',
+        entityId: params.taskId,
+        metadata: { projectId: params.projectId, updatedFields: Object.keys(params.dto).filter((k) => params.dto[k as keyof typeof params.dto] !== undefined) },
+      })
+      .catch((err) => this.logger.error('Audit log failed on project.task.updated', err))
+    return this.toTaskSummaryDto(updated)
+  }
+
+  async deleteTask(params: {
+    projectId: string
+    taskId: string
+    actorId: string
+    actorRole: Role
+    accessibleCompanyIds: string[]
+  }): Promise<void> {
+    if (!INTERNAL_ROLES.has(params.actorRole)) {
+      throw new ForbiddenException('Solo el equipo interno puede eliminar tareas')
+    }
+    const project = await this.projectsRepository.findByIdWithStats(
+      params.projectId,
+      params.accessibleCompanyIds,
+    )
+    if (!project) {
+      throw new NotFoundException(`Project ${params.projectId} not found`)
+    }
+    const task = project.tasks.find((t) => t.id === params.taskId)
+    if (!task) {
+      throw new NotFoundException(`Task ${params.taskId} not found`)
+    }
+    await this.projectsRepository.deleteTask(params.taskId)
+    this.auditService
+      .logSafe({
+        actorId: params.actorId,
+        companyId: project.companyId,
+        action: 'project.task.deleted',
+        entityType: 'Task',
+        entityId: params.taskId,
+        metadata: { projectId: params.projectId },
+      })
+      .catch((err) => this.logger.error('Audit log failed on project.task.deleted', err))
+  }
+
+  async createProjectInTx(
+    tx: Prisma.TransactionClient,
+    data: {
+      companyId: string
+      name: string
+      projectLeadId: string
+      status: ProjectStatus
+      phases: Array<{
+        name: string
+        order: number
+        status: PhaseStatus
+        completedAt?: Date | null
+        dueAt?: Date | null
+        isClientVisible: boolean
+        tasks?: Array<{
+          title: string
+          status: TaskStatus
+          priority: Priority
+          visibleToClient: boolean
+          checklistItems?: string[]
+        }>
+      }>
+    },
+  ): Promise<Project> {
+    const project = await this.projectsRepository.createProjectRecordInTx(tx, {
+      name: data.name,
+      companyId: data.companyId,
+      projectLeadId: data.projectLeadId,
+      status: data.status,
+    })
+
+    for (const phase of data.phases) {
+      const createdPhase = await this.projectsRepository.createPhaseRecordInTx(tx, {
+        name: phase.name,
+        order: phase.order,
+        status: phase.status,
+        completedAt: phase.completedAt ?? null,
+        dueAt: phase.dueAt ?? null,
+        projectId: project.id,
+        companyId: data.companyId,
+        isClientVisible: phase.isClientVisible,
+      })
+
+      for (const task of phase.tasks ?? []) {
+        const createdTask = await this.projectsRepository.createTaskRecordInTx(tx, {
+          title: task.title,
+          projectId: project.id,
+          companyId: data.companyId,
+          phaseId: createdPhase.id,
+          status: task.status,
+          priority: task.priority,
+          visibleToClient: task.visibleToClient,
+        })
+
+        if (task.checklistItems && task.checklistItems.length > 0) {
+          await this.projectsRepository.createChecklistItemsBulkInTx(tx, createdTask.id, task.checklistItems)
+        }
+      }
+    }
+
+    return project
   }
 }

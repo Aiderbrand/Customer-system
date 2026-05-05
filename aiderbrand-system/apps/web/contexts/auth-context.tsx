@@ -11,9 +11,9 @@ import React, {
 import type { ActorGroup, Company, CompanyMembership, Invitation, Role, RoleSimulationSession, User, ViewerContext } from '@/lib/types'
 import { getActorGroupForRole, hasPermission as checkPermission } from '@/lib/rbac'
 import type { Permission } from '@/lib/rbac'
-import { authApi, type AuthSession } from '@/lib/api/auth'
+import { authApi, type AuthSession, type CompleteOnboardingPayload, type OnboardingTokenInfo } from '@/lib/api/auth'
 import { apiClient } from '@/lib/api/client'
-import { MOCK_COMPANIES } from '@/lib/mock'
+import { toast } from 'sonner'
 
 type AuthStatus = 'loading' | 'authenticated' | 'unauthenticated'
 
@@ -46,6 +46,8 @@ interface AuthContextValue {
   forgotPassword: (email: string) => Promise<{ message: string }>
   resetPassword: (token: string, password: string) => Promise<{ message: string }>
   validateInvitationToken: (token: string) => Promise<Pick<Invitation, 'id' | 'email' | 'role' | 'status' | 'expiresAt'>>
+  validateOnboardingToken: (token: string) => Promise<OnboardingTokenInfo>
+  completeOnboarding: (payload: CompleteOnboardingPayload) => Promise<{ projectName: string }>
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null)
@@ -129,17 +131,8 @@ function toStoredState(preferredCompanyId: string | null): StoredAuthState {
   }
 }
 
-function resolveMockCompatibleCompany(membership: CompanyMembership | null): Company | null {
+function resolveCompany(membership: CompanyMembership | null): Company | null {
   if (!membership) return null
-
-  const compatibleMockCompany = MOCK_COMPANIES.find(
-    (company) => company.slug === membership.companySlug,
-  )
-
-  if (compatibleMockCompany) {
-    return compatibleMockCompany
-  }
-
   return {
     id: membership.companyId,
     name: membership.companyName,
@@ -231,7 +224,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       ?? null
   }, [effectiveCompanyId, memberships])
   const currentCompany = useMemo<Company | null>(() => {
-    return resolveMockCompatibleCompany(activeMembership)
+    return resolveCompany(activeMembership)
   }, [activeMembership])
   const effectiveRole = simulation?.effectiveRole ?? activeMembership?.role ?? null
   const actorGroup = effectiveRole ? getActorGroupForRole(effectiveRole) : null
@@ -298,6 +291,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const startRoleSimulation = useCallback(async (role: Role) => {
     if (!accessToken || !actorHasSystemAdminCapability) {
+      toast.error('No tenés permiso para simular roles')
       return
     }
 
@@ -344,6 +338,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return authApi.validateInvitationToken(token)
   }, [])
 
+  const validateOnboardingToken = useCallback(async (token: string) => {
+    return authApi.validateOnboardingToken(token)
+  }, [])
+
+  const completeOnboarding = useCallback(
+    async (payload: CompleteOnboardingPayload): Promise<{ projectName: string }> => {
+      const { session, projectName } = await authApi.submitOnboarding(payload)
+      applySession(session)
+      return { projectName }
+    },
+    [applySession],
+  )
+
   const value = useMemo<AuthContextValue>(
     () => ({
       status,
@@ -370,6 +377,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       forgotPassword,
       resetPassword,
       validateInvitationToken,
+      validateOnboardingToken,
+      completeOnboarding,
     }),
     [
       status,
@@ -395,6 +404,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       forgotPassword,
       resetPassword,
       validateInvitationToken,
+      validateOnboardingToken,
+      completeOnboarding,
     ],
   )
 

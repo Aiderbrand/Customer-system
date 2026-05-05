@@ -13,6 +13,7 @@ import {
   InviteMemberDialog,
   MembershipRoleDialog,
 } from '@/features/companies/components/company-dialogs'
+import { InviteClientDialog } from '@/features/companies/components/InviteClientDialog'
 import { CompanyActivitySection } from '@/features/companies/components/company-activity-section'
 import { CompanyDetailHeader } from '@/features/companies/components/company-detail-header'
 import { CompanyDetailOverview } from '@/features/companies/components/company-detail-overview'
@@ -27,27 +28,31 @@ import { getInvitableRoles } from '@/lib/rbac'
 import type { CompanyDetailMembershipItem, CompanyDetailPayload, Invitation } from '@/lib/types'
 
 export function CompanyDetailPage({ companyId }: { companyId: string }) {
-  const { currentRole, hasPermission } = useAuth()
+  const { currentRole, hasPermission, actorGroup } = useAuth()
   const [detail, setDetail] = useState<CompanyDetailPayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [editOpen, setEditOpen] = useState(false)
   const [inviteOpen, setInviteOpen] = useState(false)
+  const [inviteClientOpen, setInviteClientOpen] = useState(false)
   const [companyStatusDialogOpen, setCompanyStatusDialogOpen] = useState(false)
   const [membershipTarget, setMembershipTarget] = useState<CompanyDetailMembershipItem | null>(null)
   const [membershipRoleTarget, setMembershipRoleTarget] = useState<CompanyDetailMembershipItem | null>(null)
   const [invitationTarget, setInvitationTarget] = useState<Invitation | null>(null)
   const [editSubmitting, setEditSubmitting] = useState(false)
   const [inviteSubmitting, setInviteSubmitting] = useState(false)
+  const [inviteClientSubmitting, setInviteClientSubmitting] = useState(false)
   const [statusSubmitting, setStatusSubmitting] = useState(false)
   const [membershipSubmitting, setMembershipSubmitting] = useState(false)
   const [invitationSubmitting, setInvitationSubmitting] = useState(false)
   const [membershipRoleSubmitting, setMembershipRoleSubmitting] = useState(false)
   const [editError, setEditError] = useState<string | null>(null)
   const [inviteError, setInviteError] = useState<string | null>(null)
+  const [inviteClientError, setInviteClientError] = useState<string | null>(null)
   const [membershipRoleError, setMembershipRoleError] = useState<string | null>(null)
 
   const canInvite = hasPermission('companies:invite')
+  const canInviteOnboarding = actorGroup === 'internal'
   const canUpdate = hasPermission('companies:update')
   const canUpdateMemberships = hasPermission('companies:memberships:update')
   const canUpdateStatus = hasPermission('companies:status')
@@ -121,19 +126,55 @@ export function CompanyDetailPage({ companyId }: { companyId: string }) {
 
     try {
       const result = await companyService.createInvitation(detail.company.id, payload)
-      toast.success(result.delivery.sent ? 'Email enviado' : 'Invitación lista para compartir', {
-        description: result.delivery.sent
-          ? 'La invitación se envió por email y quedó registrada para seguimiento.'
-          : result.inviteUrl
-            ? `No se pudo enviar el email. Compartí manualmente este enlace: ${result.inviteUrl}`
-            : 'La invitación quedó registrada, pero el envío no pudo confirmarse.',
-      })
+      const isQueued = result.delivery.reason === 'email_queued'
+      toast.success(
+        result.delivery.sent || isQueued ? 'Invitación enviada' : 'Invitación lista para compartir',
+        {
+          description: isQueued
+            ? 'El email fue encolado y será entregado en breve.'
+            : result.delivery.sent
+              ? 'La invitación se envió por email y quedó registrada para seguimiento.'
+              : result.inviteUrl
+                ? `No se pudo enviar el email. Compartí manualmente este enlace: ${result.inviteUrl}`
+                : 'La invitación quedó registrada, pero el envío no pudo confirmarse.',
+        },
+      )
       setInviteOpen(false)
       await fetchDetail({ silent: true })
     } catch (err) {
       setInviteError(err instanceof Error ? err.message : 'No se pudo enviar la invitación.')
     } finally {
       setInviteSubmitting(false)
+    }
+  }
+
+  async function handleInviteClient(payload: { email: string; role: 'ACCOUNT_OWNER'; withOnboarding: true }) {
+    if (!detail) return
+
+    setInviteClientSubmitting(true)
+    setInviteClientError(null)
+
+    try {
+      const result = await companyService.createInvitation(detail.company.id, payload)
+      const isQueued = result.delivery.reason === 'email_queued'
+      toast.success(
+        result.delivery.sent || isQueued ? 'Invitación de onboarding enviada' : 'Invitación lista para compartir',
+        {
+          description: isQueued
+            ? 'El email de onboarding fue encolado y será entregado en breve.'
+            : result.delivery.sent
+              ? 'El cliente recibirá un email para completar su registro y formulario inicial.'
+              : result.inviteUrl
+                ? `No se pudo enviar el email. Compartí manualmente este enlace: ${result.inviteUrl}`
+                : 'La invitación quedó registrada, pero el envío no pudo confirmarse.',
+        },
+      )
+      setInviteClientOpen(false)
+      await fetchDetail({ silent: true })
+    } catch (err) {
+      setInviteClientError(err instanceof Error ? err.message : 'No se pudo enviar la invitación de onboarding.')
+    } finally {
+      setInviteClientSubmitting(false)
     }
   }
 
@@ -231,9 +272,11 @@ export function CompanyDetailPage({ companyId }: { companyId: string }) {
           companySlug={detail.company.slug}
           isActive={detail.company.isActive}
           canInvite={viewModel.sectionFlags.showPrimaryInvite}
+          canInviteClient={canInviteOnboarding}
           canEdit={viewModel.sectionFlags.showSecondaryEdit}
           canUpdateStatus={viewModel.sectionFlags.showSecondaryStatus}
           onInvite={() => setInviteOpen(true)}
+          onInviteClient={() => setInviteClientOpen(true)}
           onEdit={() => setEditOpen(true)}
           onToggleStatus={() => setCompanyStatusDialogOpen(true)}
         />
@@ -285,6 +328,15 @@ export function CompanyDetailPage({ companyId }: { companyId: string }) {
         error={inviteError}
         onOpenChange={setInviteOpen}
         onSubmit={handleInvite}
+      />
+
+      <InviteClientDialog
+        open={inviteClientOpen}
+        companyName={detail.company.name}
+        submitting={inviteClientSubmitting}
+        error={inviteClientError}
+        onOpenChange={setInviteClientOpen}
+        onSubmit={(payload) => void handleInviteClient(payload)}
       />
 
       <MembershipRoleDialog

@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common'
+import { EventEmitterModule } from '@nestjs/event-emitter'
 import { ConfigModule } from '@nestjs/config'
 import { PrismaModule } from './prisma/prisma.module'
 import { AuditModule } from './audit/audit.module'
@@ -10,6 +11,7 @@ import { InvitationsModule } from './invitations/invitations.module'
 import { ProjectsModule } from './projects/projects.module'
 import { TicketsModule } from './tickets/tickets.module'
 import { MailModule } from './mail/mail.module'
+import { OnboardingModule } from './onboarding/onboarding.module'
 import appConfig from './config/app.config'
 
 @Module({
@@ -20,6 +22,9 @@ import appConfig from './config/app.config'
       load: [appConfig],
       envFilePath: ['.env.local', '.env'],
     }),
+
+    // ─── Event bus (global, for event-driven notifications) ─────────────────
+    EventEmitterModule.forRoot({ global: true }),
 
     // ─── Database ────────────────────────────────────────────────────────────
     PrismaModule,
@@ -36,6 +41,7 @@ import appConfig from './config/app.config'
     InvitationsModule,
     ProjectsModule,
     TicketsModule,
+    OnboardingModule,
   ],
 })
 export class AppModule {}

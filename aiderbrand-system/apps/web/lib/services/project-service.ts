@@ -264,23 +264,22 @@ class HttpProjectService implements ProjectService {
     }))
   }
 
-  async getProject(companyId: string, id: string): Promise<ProjectWithStats | null> {
-    const data = await apiClient.request<ApiHubResponse>(
-      `/projects/hub?companyIds=${encodeURIComponent(companyId)}`,
-    )
-    const found = data.items.find((item) => item.id === id)
-    if (!found) return null
-
-    return {
-      id: found.id,
-      companyId: found.companyId,
-      name: found.name,
-      description: found.description,
-      status: found.status as Project['status'],
-      createdAt: new Date(found.createdAt),
-      updatedAt: new Date(found.updatedAt),
-      ticketCount: found.ticketCount,
-      openTicketCount: found.openTicketCount,
+  async getProject(_companyId: string, id: string): Promise<ProjectWithStats | null> {
+    try {
+      const data = await apiClient.request<ApiWorkspaceResponse>(`/projects/${id}/workspace`)
+      return {
+        id: data.project.id,
+        companyId: data.project.companyId,
+        name: data.project.name,
+        description: data.project.description,
+        status: data.project.status as Project['status'],
+        createdAt: new Date(data.project.createdAt),
+        updatedAt: new Date(data.project.updatedAt),
+        ticketCount: data.tickets.length,
+        openTicketCount: data.summary.openTickets,
+      }
+    } catch {
+      return null
     }
   }
 
@@ -358,8 +357,10 @@ class HttpProjectService implements ProjectService {
       }
 
       return result
-    } catch {
-      return null
+    } catch (err) {
+      const status = err instanceof Error ? (err as { status?: number }).status : undefined
+      if (!status || status === 404) return null
+      throw err
     }
   }
 
@@ -442,16 +443,46 @@ class HttpProjectService implements ProjectService {
     )
   }
 
-  async createProjectTask(_companyId: string, _projectId: string, _dto: CreateProjectTaskDTO): Promise<ProjectPendingTaskSummary> {
-    throw new Error('createProjectTask: not implemented yet')
+  async createProjectTask(_companyId: string, projectId: string, dto: CreateProjectTaskDTO): Promise<ProjectPendingTaskSummary> {
+    const data = await apiClient.request<ApiTaskSummary>(
+      `/projects/${projectId}/tasks`,
+      {
+        method: 'POST',
+        body: {
+          title: dto.title,
+          ...(dto.priority !== undefined && { priority: dto.priority }),
+          ...(dto.phaseId !== undefined && { phaseId: dto.phaseId }),
+          ...(dto.assigneeUserId !== undefined && { assigneeUserId: dto.assigneeUserId }),
+          ...(dto.dueAt !== undefined && { dueAt: dto.dueAt?.toISOString() ?? null }),
+        },
+      },
+    )
+    return toTask(data)
   }
 
-  async updateProjectTask(_companyId: string, _projectId: string, _taskId: string, _dto: UpdateProjectTaskDTO): Promise<ProjectPendingTaskSummary> {
-    throw new Error('updateProjectTask: not implemented yet')
+  async updateProjectTask(_companyId: string, projectId: string, taskId: string, dto: UpdateProjectTaskDTO): Promise<ProjectPendingTaskSummary> {
+    const data = await apiClient.request<ApiTaskSummary>(
+      `/projects/${projectId}/tasks/${taskId}`,
+      {
+        method: 'PATCH',
+        body: {
+          ...(dto.title !== undefined && { title: dto.title }),
+          ...(dto.status !== undefined && { status: dto.status }),
+          ...(dto.priority !== undefined && { priority: dto.priority }),
+          ...(dto.phaseId !== undefined && { phaseId: dto.phaseId }),
+          ...(dto.assigneeUserId !== undefined && { assigneeUserId: dto.assigneeUserId }),
+          ...(dto.dueAt !== undefined && { dueAt: dto.dueAt?.toISOString() ?? null }),
+        },
+      },
+    )
+    return toTask(data)
   }
 
-  async deleteProjectTask(_companyId: string, _projectId: string, _taskId: string): Promise<void> {
-    throw new Error('deleteProjectTask: not implemented yet')
+  async deleteProjectTask(_companyId: string, projectId: string, taskId: string): Promise<void> {
+    await apiClient.request<void>(
+      `/projects/${projectId}/tasks/${taskId}`,
+      { method: 'DELETE' },
+    )
   }
 
   async sendNote(projectId: string, dto: SendNoteDTO): Promise<ProjectNote> {

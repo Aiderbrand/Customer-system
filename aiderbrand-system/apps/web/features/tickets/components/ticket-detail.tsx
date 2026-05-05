@@ -1,31 +1,27 @@
 'use client'
 
 import {
+  AlertTriangle,
+  CalendarCheck,
   ChevronDown,
   ChevronUp,
-  Hash,
   Clock,
-  CalendarCheck,
-  AlertTriangle,
+  Hash,
   Paperclip,
   X,
 } from 'lucide-react'
 import { useState, useCallback } from 'react'
-import { Separator } from '@workspace/ui/components/separator'
-import { Badge } from '@workspace/ui/components/badge'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@workspace/ui/components/card'
 import {
   Avatar,
   AvatarFallback,
 } from '@workspace/ui/components/avatar'
-import { Alert, AlertTitle, AlertDescription } from '@workspace/ui/components/alert'
 import {
   ResizableHandle,
   ResizablePanel,
   ResizablePanelGroup,
 } from '@workspace/ui/components/resizable'
 import { cn } from '@workspace/ui/lib/utils'
-import { getSlaStatus } from '@/lib/sla'
+import { getSlaStatus, formatSlaRemaining } from '@/lib/sla'
 import { TicketDetailHeader } from './ticket-detail-header'
 import { TicketTimeline } from './ticket-timeline'
 import { TicketReplyBox } from './ticket-reply-box'
@@ -49,327 +45,197 @@ interface TicketDetailProps {
   onAssign: (userId: string) => void
   onComment: (content: string, type: CommentType) => Promise<void>
   onDirtyChange?: (dirty: boolean) => void
-  /**
-   * Called when the user selects files to attach from the reply box.
-   * The container handles persistence and optimistic state update.
-   */
   onAttachFiles?: (files: File[]) => Promise<PersistedAttachment[]>
-  /**
-   * Called when the user removes a persisted attachment from the sidebar.
-   */
   onRemoveFile?: (fileId: string) => Promise<void>
   currentUserId: string
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+function getInitials(name: string): string {
+  return name.split(' ').slice(0, 2).map((p) => p[0]?.toUpperCase() ?? '').join('')
+}
+
 function formatDateTime(date: Date): string {
   return date.toLocaleString('es-AR', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
   })
 }
 
 function formatDate(date: Date): string {
   return date.toLocaleDateString('es-AR', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
+    day: '2-digit', month: '2-digit', year: 'numeric',
   })
 }
 
-function getInitials(name: string): string {
-  return name
-    .split(' ')
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase() ?? '')
-    .join('')
+// ─── SLA chip ─────────────────────────────────────────────────────────────────
+
+function SlaAlert({ status, deadline }: { status: 'critical' | 'overdue'; deadline: Date }) {
+  const remaining = formatSlaRemaining(deadline)
+  return (
+    <div
+      className={cn(
+        'flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium',
+        status === 'overdue'
+          ? 'bg-destructive/8 text-destructive dark:bg-destructive/15'
+          : 'bg-amber-50 text-amber-700 dark:bg-amber-950/30 dark:text-amber-400',
+      )}
+    >
+      <AlertTriangle className="h-3 w-3 shrink-0" aria-hidden />
+      {status === 'overdue'
+        ? `SLA vencido · ${remaining}`
+        : `SLA crítico · ${remaining} restantes`}
+    </div>
+  )
 }
 
-// ─── Archivos section ─────────────────────────────────────────────────────────
-
-interface TicketFilesSectionProps {
-  files: PersistedAttachment[]
-  onOpenFile: (file: Attachment) => void
-  onRemoveFile?: (fileId: string) => void
-  canRemove?: boolean
-}
+// ─── Files section ─────────────────────────────────────────────────────────────
 
 function TicketFilesSection({
   files,
   onOpenFile,
   onRemoveFile,
   canRemove = false,
-}: TicketFilesSectionProps) {
+}: {
+  files: PersistedAttachment[]
+  onOpenFile: (file: Attachment) => void
+  onRemoveFile?: (fileId: string) => void
+  canRemove?: boolean
+}) {
   if (files.length === 0) {
     return (
-      <div className="flex flex-col items-center gap-1.5 py-3 text-center">
-        <Paperclip className="size-4 text-muted-foreground/40" aria-hidden="true" />
-        <p className="text-xs text-muted-foreground/70 leading-snug">
-          Sin archivos adjuntos.
-          <br />
-          Usá el botón <span className="font-medium">📎</span> del compositor para adjuntar.
-        </p>
-      </div>
+      <p className="text-xs text-muted-foreground/60 py-1">
+        Sin archivos. Adjuntá desde el compositor.
+      </p>
     )
   }
 
   return (
-    <ul className="flex flex-col gap-1.5" aria-label="Archivos adjuntos">
-      {files.map((file) => {
-        const handleRemove = canRemove && onRemoveFile
-          ? () => onRemoveFile(file.id)
-          : undefined
-
-        return (
-          <li key={file.id} className="relative">
-            {/* Clickable area to open file viewer */}
+    <ul className="flex flex-col gap-1.5">
+      {files.map((file) => (
+        <li key={file.id} className="relative">
+          <button
+            type="button"
+            className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-md"
+            onClick={() => onOpenFile(file)}
+          >
+            <AttachmentChip
+              attachment={file}
+              maxNameLength={28}
+              className="cursor-pointer hover:border-primary/40 hover:bg-muted/50 transition-colors pr-8"
+            />
+          </button>
+          {canRemove && onRemoveFile && (
             <button
               type="button"
-              className="w-full text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-md"
-              onClick={() => onOpenFile(file)}
-              aria-label={`Abrir ${file.name}`}
+              onClick={(e) => { e.stopPropagation(); onRemoveFile(file.id) }}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none rounded-sm"
             >
-              <AttachmentChip
-                attachment={file}
-                maxNameLength={30}
-                className="cursor-pointer hover:border-primary/40 hover:bg-muted/50 transition-colors pr-8"
-              />
+              <X className="size-3.5" />
             </button>
-            {/* Remove button — absolutely positioned so it doesn't bubble into open handler */}
-            {handleRemove && (
-              <button
-                type="button"
-                aria-label={`Quitar ${file.name}`}
-                onClick={(e) => {
-                  e.stopPropagation()
-                  handleRemove()
-                }}
-                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-sm"
-              >
-                <X className="size-3.5" aria-hidden="true" />
-              </button>
-            )}
-          </li>
-        )
-      })}
+          )}
+        </li>
+      ))}
     </ul>
   )
 }
 
-interface TicketConversationCardProps {
-  ticket: TicketWithTimeline
-  currentUserId: string
-  canPostInternal: boolean
-  onComment: (content: string, type: CommentType) => Promise<void>
-  onDirtyChange?: (dirty: boolean) => void
-  onAttachFiles?: (files: File[]) => void
-  onOpenFile: (attachment: Attachment) => void
-  descriptionExpanded?: boolean
-  onDescriptionExpandedChange?: (value: boolean) => void
-}
+// ─── Sidebar content (shared between mobile/desktop) ─────────────────────────
 
-function TicketConversationCard({
-  ticket,
-  currentUserId,
-  canPostInternal,
-  onComment,
-  onDirtyChange,
-  onAttachFiles,
-  onOpenFile,
-  descriptionExpanded = true,
-  onDescriptionExpandedChange,
-}: TicketConversationCardProps) {
-  const canToggleDescription = ticket.description && typeof onDescriptionExpandedChange === 'function'
-
-  return (
-    <Card className="flex min-h-0 flex-1 flex-col overflow-hidden shadow-sm">
-      <CardHeader className="gap-4 border-b">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex flex-col gap-1">
-            <CardTitle>Conversación y actividad</CardTitle>
-            <CardDescription>Chat operativo, eventos del sistema y respuestas del equipo.</CardDescription>
-          </div>
-          <Badge variant="secondary">{ticket.timeline.length}</Badge>
-        </div>
-
-        {ticket.description ? (
-          <div className="flex flex-col gap-2">
-            {canToggleDescription ? (
-              <button
-                type="button"
-                onClick={() => onDescriptionExpandedChange(!descriptionExpanded)}
-                className="flex items-center justify-between text-sm font-medium text-foreground transition-colors hover:text-foreground/80"
-                aria-expanded={descriptionExpanded}
-              >
-                <span>Descripción</span>
-                {descriptionExpanded ? (
-                  <ChevronUp className="size-4 text-muted-foreground" aria-hidden="true" />
-                ) : (
-                  <ChevronDown className="size-4 text-muted-foreground" aria-hidden="true" />
-                )}
-              </button>
-            ) : (
-              <span className="text-sm font-medium text-foreground">Descripción</span>
-            )}
-
-            {descriptionExpanded ? (
-              <div className="rounded-xl border bg-muted/30 px-4 py-3">
-                <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">
-                  {ticket.description}
-                </p>
-              </div>
-            ) : null}
-          </div>
-        ) : null}
-      </CardHeader>
-
-      <CardContent className="flex min-h-0 flex-1 flex-col gap-0 px-5 pb-0 pt-5">
-        <TicketTimeline
-          events={ticket.timeline}
-          currentUserId={currentUserId}
-          className="min-h-0 flex-1 overflow-hidden"
-          onOpenFile={onOpenFile}
-        />
-      </CardContent>
-
-      <div className="border-t px-5 pb-5 pt-4">
-        <TicketReplyBox
-          onSubmit={onComment}
-          canPostInternal={canPostInternal}
-          onDirtyChange={onDirtyChange}
-          onAttachFiles={onAttachFiles}
-        />
-      </div>
-    </Card>
-  )
-}
-
-interface TicketContextPanelProps {
-  ticket: TicketWithTimeline
-  projectName?: string
-  assigneeName: string | null
-  assigneeEmail: string | null
-  handleOpenFile: (file: Attachment) => void
-  handleRemoveFile: (fileId: string) => void
-  onRemoveFile?: (fileId: string) => Promise<void>
-  className?: string
-}
-
-function TicketContextPanel({
+function TicketSidebarContent({
   ticket,
   projectName,
   assigneeName,
   assigneeEmail,
-  handleOpenFile,
-  handleRemoveFile,
+  onOpenFile,
   onRemoveFile,
-  className,
-}: TicketContextPanelProps) {
+  canRemove,
+}: {
+  ticket: TicketWithTimeline
+  projectName?: string
+  assigneeName: string | null
+  assigneeEmail: string | null
+  onOpenFile: (f: Attachment) => void
+  onRemoveFile?: (id: string) => void
+  canRemove: boolean
+}) {
   return (
-    <Card className={cn('flex min-h-0 flex-col shadow-sm', className)}>
-      <CardHeader className="gap-1 border-b">
-        <CardTitle>Contexto</CardTitle>
-        <CardDescription>Metadatos, SLA y archivos del ticket en una sola superficie.</CardDescription>
-      </CardHeader>
-      <CardContent className="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-5">
-        <div className="flex flex-col gap-1">
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">ID del ticket</span>
-          <div className="flex items-center gap-1.5 font-mono text-sm text-foreground">
-            <Hash className="size-3.5 text-muted-foreground" aria-hidden="true" />
-            <span>{ticket.id}</span>
-          </div>
+    <div className="flex flex-col divide-y divide-border/60">
+      {/* Ticket ID */}
+      <div className="flex items-center gap-1.5 py-3 px-1">
+        <Hash className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50" />
+        <span className="font-mono text-xs text-muted-foreground/70 truncate">{ticket.id}</span>
+      </div>
+
+      {/* SLA */}
+      <div className="py-3 px-1 flex flex-col gap-1.5">
+        <span className="text-xs text-muted-foreground">SLA</span>
+        <TicketSlaIndicator deadline={ticket.slaDeadline} createdAt={ticket.createdAt} className="w-full" />
+        <span className="text-xs text-muted-foreground">Vence {formatDate(ticket.slaDeadline)}</span>
+      </div>
+
+      {/* Dates */}
+      <div className="py-3 px-1 flex flex-col gap-2">
+        <div className="flex items-center gap-1.5 text-xs">
+          <Clock className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50" />
+          <span className="text-muted-foreground">Creado</span>
+          <span className="ml-auto text-foreground tabular-nums">{formatDateTime(ticket.createdAt)}</span>
         </div>
+        <div className="flex items-center gap-1.5 text-xs">
+          <CalendarCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground/50" />
+          <span className="text-muted-foreground">Actualizado</span>
+          <span className="ml-auto text-foreground tabular-nums">{formatDateTime(ticket.updatedAt)}</span>
+        </div>
+      </div>
 
-        <Separator />
-
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-col gap-0.5">
-            <span className="text-xs font-medium text-muted-foreground">Creado</span>
-            <div className="flex items-center gap-1.5 text-sm text-foreground">
-              <Clock className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-              <span>{formatDateTime(ticket.createdAt)}</span>
+      {/* Assignee */}
+      <div className="py-3 px-1 flex flex-col gap-2">
+        <span className="text-xs text-muted-foreground">Asignado a</span>
+        {assigneeName ? (
+          <div className="flex items-center gap-2">
+            <Avatar className="size-7 shrink-0">
+              <AvatarFallback className="text-xs">{getInitials(assigneeName)}</AvatarFallback>
+            </Avatar>
+            <div className="flex min-w-0 flex-col">
+              <span className="truncate text-sm font-medium">{assigneeName}</span>
+              {assigneeEmail && <span className="truncate text-xs text-muted-foreground">{assigneeEmail}</span>}
             </div>
           </div>
-          <div className="flex flex-col gap-0.5">
-            <span className="text-xs font-medium text-muted-foreground">Última actualización</span>
-            <div className="flex items-center gap-1.5 text-sm text-foreground">
-              <CalendarCheck className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-              <span>{formatDateTime(ticket.updatedAt)}</span>
-            </div>
-          </div>
+        ) : (
+          <span className="text-sm text-muted-foreground/60">Sin asignar</span>
+        )}
+      </div>
+
+      {/* Project */}
+      {projectName && (
+        <div className="py-3 px-1 flex flex-col gap-1">
+          <span className="text-xs text-muted-foreground">Proyecto</span>
+          <span className="text-sm text-foreground">{projectName}</span>
         </div>
+      )}
 
-        <Separator />
-
-        <div className="flex flex-col gap-1.5">
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">SLA</span>
-          <TicketSlaIndicator
-            deadline={ticket.slaDeadline}
-            createdAt={ticket.createdAt}
-            showLabel={false}
-            className="w-full"
-          />
-          <span className="text-xs text-muted-foreground">Vence: {formatDate(ticket.slaDeadline)}</span>
-        </div>
-
-        <Separator />
-
-        <div className="flex flex-col gap-1.5">
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Asignado a</span>
-          {assigneeName ? (
-            <div className="flex items-center gap-2.5">
-              <Avatar className="size-8">
-                <AvatarFallback className="text-xs">{getInitials(assigneeName)}</AvatarFallback>
-              </Avatar>
-              <div className="flex min-w-0 flex-col">
-                <span className="truncate text-sm font-medium text-foreground">{assigneeName}</span>
-                {assigneeEmail ? (
-                  <span className="truncate text-xs text-muted-foreground">{assigneeEmail}</span>
-                ) : null}
-              </div>
-            </div>
-          ) : (
-            <span className="text-sm text-muted-foreground">Sin asignar</span>
+      {/* Files */}
+      <div className="py-3 px-1 flex flex-col gap-2">
+        <div className="flex items-center gap-1.5">
+          <Paperclip className="h-3.5 w-3.5 text-muted-foreground/50" />
+          <span className="text-xs text-muted-foreground">Archivos</span>
+          {ticket.files.length > 0 && (
+            <span className="ml-1 tabular-nums text-xs text-foreground font-medium">{ticket.files.length}</span>
           )}
         </div>
-
-        {ticket.projectId && projectName ? (
-          <>
-            <Separator />
-            <div className="flex flex-col gap-1.5">
-              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Proyecto</span>
-              <span className="text-sm text-foreground">{projectName}</span>
-            </div>
-          </>
-        ) : null}
-
-        <Separator />
-
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-1.5">
-              <Paperclip className="size-3.5 text-muted-foreground" aria-hidden="true" />
-              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Archivos</span>
-            </div>
-            <Badge variant="secondary">{ticket.files.length}</Badge>
-          </div>
-          <TicketFilesSection
-            files={ticket.files}
-            onOpenFile={handleOpenFile}
-            onRemoveFile={onRemoveFile ? handleRemoveFile : undefined}
-            canRemove={Boolean(onRemoveFile)}
-          />
-        </div>
-      </CardContent>
-    </Card>
+        <TicketFilesSection
+          files={ticket.files}
+          onOpenFile={onOpenFile}
+          onRemoveFile={onRemoveFile}
+          canRemove={canRemove}
+        />
+      </div>
+    </div>
   )
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
+// ─── Main component ───────────────────────────────────────────────────────────
 
 export function TicketDetail({
   ticket,
@@ -395,15 +261,8 @@ export function TicketDetail({
       setActiveImage(attachment)
       return
     }
-
     setActiveFile(attachment)
   }, [])
-
-  const assigneeName = ticket.assignedToName ?? null
-  const assigneeEmail = ticket.assignedToEmail ?? null
-  const isOpen = ticket.status !== 'cerrado'
-  const slaStatus = isOpen ? getSlaStatus(ticket.slaDeadline) : 'ok'
-  const showSlaAlert = isOpen && (slaStatus === 'critical' || slaStatus === 'overdue')
 
   const handleAttachFiles = useCallback((files: File[]) => {
     void onAttachFiles?.(files)
@@ -413,102 +272,141 @@ export function TicketDetail({
     void onRemoveFile?.(fileId)
   }, [onRemoveFile])
 
+  const assigneeName = ticket.assignedToName ?? null
+  const assigneeEmail = ticket.assignedToEmail ?? null
+  const isOpen = ticket.status !== 'cerrado'
+  const slaStatus = isOpen ? getSlaStatus(ticket.slaDeadline) : 'ok'
+  const showSlaAlert = isOpen && (slaStatus === 'critical' || slaStatus === 'overdue')
+
+  const sharedHeader = (
+    <div className="flex flex-col gap-3">
+      <TicketDetailHeader
+        ticket={ticket}
+        projectName={projectName}
+        assigneeName={assigneeName ?? undefined}
+        canChangeStatus={canChangeStatus}
+        canAssign={canAssign}
+        onStatusChange={onStatusChange}
+        onAssign={onAssign}
+        members={members}
+      />
+
+      {showSlaAlert && (
+        <SlaAlert status={slaStatus as 'critical' | 'overdue'} deadline={ticket.slaDeadline} />
+      )}
+
+      {ticket.description && (
+        <div className="flex flex-col gap-1.5">
+          <button
+            type="button"
+            onClick={() => setDescriptionExpanded((v) => !v)}
+            className="flex items-center gap-1 text-xs font-medium text-muted-foreground transition-colors hover:text-foreground"
+          >
+            {descriptionExpanded ? (
+              <ChevronUp className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5" />
+            )}
+            Descripción
+          </button>
+          {descriptionExpanded && (
+            <p className="rounded-lg bg-muted/40 px-3 py-2.5 text-sm leading-relaxed text-foreground whitespace-pre-wrap">
+              {ticket.description}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  )
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-4 overflow-hidden lg:h-[calc(100svh-8.5rem)]">
-      {showSlaAlert ? (
-        slaStatus === 'overdue' ? (
-          <Alert variant="destructive">
-            <AlertTriangle className="h-4 w-4" aria-hidden="true" />
-            <AlertTitle>SLA vencido</AlertTitle>
-            <AlertDescription>Este ticket superó su tiempo de respuesta.</AlertDescription>
-          </Alert>
-        ) : (
-          <Alert className="border-amber-400/60 text-amber-700 dark:text-amber-400 [&>svg]:text-amber-600 dark:[&>svg]:text-amber-400">
-            <AlertTriangle className="h-4 w-4" aria-hidden="true" />
-            <AlertTitle>SLA crítico</AlertTitle>
-            <AlertDescription>Quedan menos de 4 horas para el vencimiento.</AlertDescription>
-          </Alert>
-        )
-      ) : null}
 
+      {/* ── Mobile ── */}
       <div className="min-h-0 flex-1 overflow-auto lg:hidden">
-        <div className="grid gap-6 pb-1">
-          <TicketDetailHeader
-            ticket={ticket}
-            projectName={projectName}
-            assigneeName={assigneeName ?? undefined}
-            canChangeStatus={canChangeStatus}
-            canAssign={canAssign}
-            onStatusChange={onStatusChange}
-            onAssign={onAssign}
-            members={members}
-          />
+        <div className="flex flex-col gap-6 pb-2">
+          <div className="rounded-2xl border bg-card p-5 shadow-sm">{sharedHeader}</div>
 
-          <TicketConversationCard
-            ticket={ticket}
-            currentUserId={currentUserId}
-            canPostInternal={canPostInternal}
-            onComment={onComment}
-            onDirtyChange={onDirtyChange}
-            onAttachFiles={onAttachFiles ? handleAttachFiles : undefined}
-            onOpenFile={handleOpenFile}
-          />
+          <div className="flex min-h-0 flex-col rounded-2xl border bg-card shadow-sm overflow-hidden">
+            <TicketTimeline
+              events={ticket.timeline}
+              currentUserId={currentUserId}
+              className="min-h-[12rem] max-h-[40vh]"
+              onOpenFile={handleOpenFile}
+            />
+            <div className="border-t px-5 pb-5 pt-4">
+              <TicketReplyBox
+                onSubmit={onComment}
+                canPostInternal={canPostInternal}
+                onDirtyChange={onDirtyChange}
+                onAttachFiles={onAttachFiles ? handleAttachFiles : undefined}
+              />
+            </div>
+          </div>
 
-          <TicketContextPanel
-            ticket={ticket}
-            projectName={projectName}
-            assigneeName={assigneeName}
-            assigneeEmail={assigneeEmail}
-            handleOpenFile={handleOpenFile}
-            handleRemoveFile={handleRemoveFile}
-            onRemoveFile={onRemoveFile}
-          />
+          <div className="rounded-2xl border bg-card px-4 py-3 shadow-sm">
+            <TicketSidebarContent
+              ticket={ticket}
+              projectName={projectName}
+              assigneeName={assigneeName}
+              assigneeEmail={assigneeEmail}
+              onOpenFile={handleOpenFile}
+              onRemoveFile={onRemoveFile ? handleRemoveFile : undefined}
+              canRemove={Boolean(onRemoveFile)}
+            />
+          </div>
         </div>
       </div>
 
+      {/* ── Desktop ── */}
       <div className="hidden min-h-0 flex-1 overflow-hidden lg:block">
         <ResizablePanelGroup orientation="horizontal" className="gap-0 rounded-2xl border bg-card shadow-sm">
-          <ResizablePanel defaultSize="72%" minSize="55%">
-            <div className="grid min-h-0 h-full grid-rows-[auto_1fr] gap-6 overflow-hidden p-6">
-              <TicketDetailHeader
-                ticket={ticket}
-                projectName={projectName}
-                assigneeName={assigneeName ?? undefined}
-                canChangeStatus={canChangeStatus}
-                canAssign={canAssign}
-                onStatusChange={onStatusChange}
-                onAssign={onAssign}
-                members={members}
+
+          {/* Left: conversation */}
+          <ResizablePanel defaultSize="70%" minSize="55%">
+            <div className="flex h-full min-h-0 flex-col overflow-hidden">
+              {/* Header */}
+              <div className="shrink-0 border-b px-6 py-5">
+                {sharedHeader}
+              </div>
+
+              {/* Timeline */}
+              <TicketTimeline
+                events={ticket.timeline}
+                currentUserId={currentUserId}
+                className="min-h-0 flex-1 overflow-hidden"
+                onOpenFile={handleOpenFile}
               />
 
-              <TicketConversationCard
-                ticket={ticket}
-                currentUserId={currentUserId}
-                canPostInternal={canPostInternal}
-                onComment={onComment}
-                onDirtyChange={onDirtyChange}
-                onAttachFiles={onAttachFiles ? handleAttachFiles : undefined}
-                onOpenFile={handleOpenFile}
-                descriptionExpanded={descriptionExpanded}
-                onDescriptionExpandedChange={setDescriptionExpanded}
-              />
+              {/* Reply */}
+              <div className="shrink-0 border-t px-6 pb-5 pt-4">
+                <TicketReplyBox
+                  onSubmit={onComment}
+                  canPostInternal={canPostInternal}
+                  onDirtyChange={onDirtyChange}
+                  onAttachFiles={onAttachFiles ? handleAttachFiles : undefined}
+                />
+              </div>
             </div>
           </ResizablePanel>
 
           <ResizableHandle withHandle />
 
-          <ResizablePanel defaultSize="28%" minSize="22%" maxSize="40%">
-            <TicketContextPanel
-              ticket={ticket}
-              projectName={projectName}
-              assigneeName={assigneeName}
-              assigneeEmail={assigneeEmail}
-              handleOpenFile={handleOpenFile}
-              handleRemoveFile={handleRemoveFile}
-              onRemoveFile={onRemoveFile}
-              className="h-full rounded-none border-0 shadow-none"
-            />
+          {/* Right: context sidebar */}
+          <ResizablePanel defaultSize="30%" minSize="22%" maxSize="40%">
+            <div className="h-full overflow-auto px-4 py-4">
+              <TicketSidebarContent
+                ticket={ticket}
+                projectName={projectName}
+                assigneeName={assigneeName}
+                assigneeEmail={assigneeEmail}
+                onOpenFile={handleOpenFile}
+                onRemoveFile={onRemoveFile ? handleRemoveFile : undefined}
+                canRemove={Boolean(onRemoveFile)}
+              />
+            </div>
           </ResizablePanel>
+
         </ResizablePanelGroup>
       </div>
 

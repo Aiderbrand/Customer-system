@@ -26,7 +26,8 @@ import {
   RequireRoles,
 } from '../common/decorators'
 import { PublicRateLimit } from '../common/decorators/public-rate-limit.decorator'
-import { INVITE_CAPABLE_ROLES, Role } from '../common/enums/role.enum'
+import { INVITE_CAPABLE_ROLES, Role as LocalRole } from '../common/enums/role.enum'
+import { Role } from '@prisma/client'
 import type { Invitation } from '@prisma/client'
 import { PublicRateLimitGuard } from '../common/guards/public-rate-limit.guard'
 import type { AuthContextData, JwtPayload } from '../common/types'
@@ -52,7 +53,7 @@ export class InvitationsController {
   @HttpCode(HttpStatus.CREATED)
   @UseGuards(JwtAuthGuard, AuthContextGuard, RolesGuard)
   @AllowInternalCrossCompany()
-  @RequireRoles(Role.SYSTEM_ADMIN, Role.PROJECT_LEAD, Role.ACCOUNT_OWNER)
+  @RequireRoles(LocalRole.SYSTEM_ADMIN, LocalRole.PROJECT_LEAD)
   async createForHub(
     @Param('companyId', ParseUUIDPipe) companyId: string,
     @Body() dto: CreateInvitationDto,
@@ -77,7 +78,7 @@ export class InvitationsController {
   @HttpCode(HttpStatus.OK)
   @UseGuards(JwtAuthGuard, AuthContextGuard, RolesGuard)
   @AllowInternalCrossCompany()
-  @RequireRoles(Role.SYSTEM_ADMIN, Role.PROJECT_LEAD, Role.ACCOUNT_OWNER)
+  @RequireRoles(LocalRole.SYSTEM_ADMIN, LocalRole.PROJECT_LEAD)
   async listForHub(
     @Param('companyId', ParseUUIDPipe) companyId: string,
     @Query('status') status?: string,
@@ -102,7 +103,7 @@ export class InvitationsController {
   @HttpCode(HttpStatus.OK)
   @UseGuards(JwtAuthGuard, AuthContextGuard, RolesGuard)
   @AllowInternalCrossCompany()
-  @RequireRoles(Role.SYSTEM_ADMIN, Role.PROJECT_LEAD, Role.ACCOUNT_OWNER)
+  @RequireRoles(LocalRole.SYSTEM_ADMIN, LocalRole.PROJECT_LEAD)
   async revokeForHub(
     @Param('companyId', ParseUUIDPipe) companyId: string,
     @Param('id', ParseUUIDPipe) id: string,
@@ -118,7 +119,7 @@ export class InvitationsController {
   @PublicRateLimit({ limit: 10, windowMs: 5 * 60_000, keyPrefix: 'invitations.validate-token' })
   async validateToken(
     @Body() dto: ValidateTokenDto,
-  ): Promise<Pick<InvitationDto, 'id' | 'email' | 'role' | 'status' | 'expiresAt'>> {
+  ): Promise<Pick<InvitationDto, 'id' | 'email' | 'role' | 'status' | 'type' | 'expiresAt'>> {
     const invitation = await this.invitationsService.validateToken(dto.token)
 
     return {
@@ -126,6 +127,7 @@ export class InvitationsController {
       email: invitation.email,
       role: invitation.role,
       status: invitation.status,
+      type: invitation.type,
       expiresAt: invitation.expiresAt.toISOString(),
     }
   }
@@ -136,23 +138,24 @@ export class InvitationsController {
     authContext: AuthContextData,
     dto: CreateInvitationDto,
   ): Promise<CreateInvitationResponseDto> {
-    const { invitation, rawToken, inviteUrl, delivery } = await this.invitationsService.create({
+    const result = await this.invitationsService.create({
       actorId: currentUser.sub,
-      actorRole: authContext.effectiveRole as unknown as Role,
+      actorRole: authContext.effectiveRole as Role,
       companyId,
       email: dto.email,
-      role: dto.role as unknown as Role,
+      role: dto.role as Role,
+      withOnboarding: dto.withOnboarding,
     })
 
     return {
-      invitation: this.toDto(invitation),
-      inviteToken: rawToken,
-      inviteUrl: delivery.sent ? null : inviteUrl,
+      invitation: this.toDto(result.invitation),
+      inviteToken: result.rawToken,
+      inviteUrl: result.publicInviteUrl,
       delivery: {
-        attempted: delivery.attempted,
-        sent: delivery.sent,
-        reason: delivery.reason,
-        manualShareRequired: !delivery.sent,
+        attempted: result.delivery.attempted,
+        sent: result.delivery.sent,
+        reason: result.delivery.reason,
+        manualShareRequired: result.manualShareRequired,
       },
     }
   }
@@ -170,7 +173,7 @@ export class InvitationsController {
   ): Promise<InvitationDto> {
     const revoked = await this.invitationsService.revoke({
       actorId: currentUser.sub,
-      actorRole: authContext.effectiveRole as unknown as Role,
+      actorRole: authContext.effectiveRole as Role,
       companyId,
       invitationId: id,
     })
@@ -183,8 +186,9 @@ export class InvitationsController {
       id: invitation.id,
       companyId: invitation.companyId,
       email: invitation.email,
-      role: invitation.role as unknown as Role,
+      role: invitation.role as Role,
       status: invitation.status,
+      type: invitation.type,
       expiresAt: invitation.expiresAt.toISOString(),
       createdById: invitation.createdById ?? null,
       acceptedAt: invitation.acceptedAt?.toISOString() ?? null,

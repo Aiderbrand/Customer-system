@@ -12,13 +12,15 @@ import { useProjectWorkspace } from '@/features/projects/hooks/use-projects'
 import { useAuth } from '@/contexts/auth-context'
 import type {
   CreatePhaseDTO,
+  CreateProjectTaskDTO,
   ProjectPhaseSummary,
   ProjectWorkspacePayload,
   UpdatePhaseDTO,
+  UpdateProjectTaskDTO,
 } from '@/lib/types'
 import { canEditProjectWorkspace } from '@/features/projects/lib/project-selectors'
 import { projectService } from '@/lib/services/project-service'
-import type { PhaseActions } from '@/features/projects/components/project-phases-section'
+import type { PhaseActions, TaskActions } from '@/features/projects/components/project-phases-section'
 
 function ProjectWorkspaceSkeleton() {
   return (
@@ -183,6 +185,70 @@ export function ProjectWorkspaceContainer({ projectId }: ProjectWorkspaceContain
     },
   }), [effectiveWorkspace?.phases, projectId])
 
+  // ─── Task actions ────────────────────────────────────────────────────────────
+
+  const taskActions: TaskActions = useMemo(() => ({
+    create: async (dto: CreateProjectTaskDTO) => {
+      try {
+        const task = await projectService.createProjectTask(
+          effectiveWorkspace?.project.companyId ?? '',
+          projectId,
+          dto,
+        )
+        setDraftWorkspace((prev) => {
+          if (!prev) return prev
+          return { ...prev, tasks: [...(prev.tasks ?? []), task] }
+        })
+        toast.success('Tarea creada', { description: `"${task.title}" fue agregada.` })
+      } catch (err) {
+        console.error('[taskActions.create]', err)
+        toast.error('No se pudo crear la tarea')
+        throw err
+      }
+    },
+
+    update: async (id: string, dto: UpdateProjectTaskDTO) => {
+      try {
+        const task = await projectService.updateProjectTask(
+          effectiveWorkspace?.project.companyId ?? '',
+          projectId,
+          id,
+          dto,
+        )
+        setDraftWorkspace((prev) => {
+          if (!prev) return prev
+          return {
+            ...prev,
+            tasks: prev.tasks.map((t) => t.id === id ? task : t),
+          }
+        })
+      } catch (err) {
+        console.error('[taskActions.update]', err)
+        toast.error('No se pudo actualizar la tarea')
+        throw err
+      }
+    },
+
+    delete: async (id: string) => {
+      try {
+        await projectService.deleteProjectTask(
+          effectiveWorkspace?.project.companyId ?? '',
+          projectId,
+          id,
+        )
+        setDraftWorkspace((prev) => {
+          if (!prev) return prev
+          return { ...prev, tasks: prev.tasks.filter((t) => t.id !== id) }
+        })
+        toast.success('Tarea eliminada')
+      } catch (err) {
+        console.error('[taskActions.delete]', err)
+        toast.error('No se pudo eliminar la tarea')
+        throw err
+      }
+    },
+  }), [effectiveWorkspace?.project.companyId, projectId])
+
   // ─── Render guards ──────────────────────────────────────────────────────────
 
   if (loading) {
@@ -285,6 +351,7 @@ export function ProjectWorkspaceContainer({ projectId }: ProjectWorkspaceContain
         onAddNote={handleAddNote}
         sectionEmptyState={sectionEmptyState}
         phaseActions={phaseActions}
+        taskActions={taskActions}
       />
 
       <ProjectSettingsSheet

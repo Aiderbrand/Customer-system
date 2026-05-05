@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
-import type { CompanyMembership, Prisma, Role } from '@prisma/client'
+import { Role, type CompanyMembership, type Prisma } from '@prisma/client'
 
 export type MembershipWithCompany = Prisma.CompanyMembershipGetPayload<{ include: { company: true } }>
 
@@ -29,7 +29,7 @@ export class MembershipsRepository {
     })
   }
 
-  async findAllByCompany(companyId: string): Promise<CompanyMembership[]> {
+  async findAllByCompany(companyId: string) {
     return this.prisma.companyMembership.findMany({
       where: { companyId, isActive: true },
       include: { user: { select: { id: true, email: true, name: true, avatarUrl: true } } },
@@ -87,5 +87,29 @@ export class MembershipsRepository {
       where: { userId_companyId: { userId, companyId } },
       data: { role },
     })
+  }
+
+  /** Upsert a membership inside an existing transaction */
+  async upsertInTx(
+    tx: Prisma.TransactionClient,
+    data: { userId: string; companyId: string; role: Role },
+  ): Promise<void> {
+    await tx.companyMembership.upsert({
+      where: { userId_companyId: { userId: data.userId, companyId: data.companyId } },
+      update: { role: data.role, isActive: true, updatedAt: new Date() },
+      create: data,
+    })
+  }
+
+  async hasSystemAdminMembership(userId: string): Promise<boolean> {
+    const membership = await this.prisma.companyMembership.findFirst({
+      where: {
+        userId,
+        role: Role.SYSTEM_ADMIN,
+        isActive: true,
+        company: { isActive: true, deletedAt: null },
+      },
+    })
+    return !!membership
   }
 }

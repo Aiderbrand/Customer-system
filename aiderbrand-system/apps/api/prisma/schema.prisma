@@ -73,6 +73,23 @@ enum CommentType {
   internal
 }
 
+enum InvitationType {
+  MEMBER
+  ONBOARDING
+}
+
+enum OnboardingStatus {
+  invited
+  in_progress
+  completed
+}
+
+enum OnboardingSubmissionStatus {
+  draft
+  submitted
+  reviewed
+}
+
 // ─── User ─────────────────────────────────────────────────────────────────────
 // No role, no companyId — roles live in CompanyMembership
 // Email is globally unique (user can belong to multiple companies)
@@ -111,12 +128,15 @@ model Company {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime? // soft delete
 
+  onboardingStatus OnboardingStatus?
+
   // Relations
-  memberships CompanyMembership[]
-  invitations Invitation[]
-  auditLogs   AuditLog[]
-  projects    Project[]
-  tickets     Ticket[]
+  memberships          CompanyMembership[]
+  invitations          Invitation[]
+  auditLogs            AuditLog[]
+  projects             Project[]
+  tickets              Ticket[]
+  onboardingSubmission OnboardingSubmission?
 
   @@map("companies")
 }
@@ -153,6 +173,7 @@ model Invitation {
   role        Role
   tokenHash   String           @unique
   status      InvitationStatus @default(PENDING)
+  type        InvitationType   @default(MEMBER)
   expiresAt   DateTime
   createdById String?
   acceptedAt  DateTime?
@@ -378,6 +399,47 @@ model TicketComment {
 
   @@index([ticketId])
   @@map("ticket_comments")
+}
+
+// ─── OnboardingSubmission ─────────────────────────────────────────────────────
+
+model OnboardingSubmission {
+  id        String   @id @default(uuid())
+  companyId String   @unique
+  userId    String
+
+  // Bloque 1 — Datos generales
+  industry       String
+  teamSize       String
+  yearsOperating String
+
+  // Bloque 2 — Operación actual
+  mainPainPoints String
+  toolsInUse     Json    // string[]
+
+  // Bloque 3 — Equipo
+  decisionMakers Json    // { name, role, email }[]
+  primaryContact Json    // { name, role, email, phone? }
+
+  // Bloque 4 — Prioridades
+  shortTermGoals String
+  midTermGoals   String
+  successMetrics String
+  budgetRange    String?
+  startTimeframe String?
+  notes          String?
+
+  // Control
+  status       OnboardingSubmissionStatus @default(draft)
+  reviewedAt   DateTime?
+  reviewedById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@map("onboarding_submissions")
 }
 
 // ─── AuditLog ─────────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 import { Injectable, ForbiddenException, NotFoundException } from '@nestjs/common'
 import { MembershipsRepository, type MembershipWithCompany } from './memberships.repository'
 import { INVITATION_PERMISSION_MATRIX, Role as LocalRole } from '../common/enums/role.enum'
-import type { CompanyMembership, Role } from '@prisma/client'
+import type { CompanyMembership, Prisma, Role } from '@prisma/client'
 import { AuditService } from '../audit/audit.service'
 
 @Injectable()
@@ -153,5 +153,16 @@ export class MembershipsService {
     role: Role
   }): Promise<CompanyMembership> {
     return this.membershipsRepository.upsert(data)
+  }
+
+  async hasSystemAdminCapability(userId: string): Promise<boolean> {
+    return this.membershipsRepository.hasSystemAdminMembership(userId)
+  }
+
+  async upsertInTx(
+    tx: Prisma.TransactionClient,
+    data: { userId: string; companyId: string; role: Role },
+  ): Promise<void> {
+    return this.membershipsRepository.upsertInTx(tx, data)
   }
 }

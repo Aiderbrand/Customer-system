@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common'
 import { UsersRepository } from './users.repository'
-import type { User } from '@prisma/client'
+import type { Prisma, User } from '@prisma/client'
 
 @Injectable()
 export class UsersService {
@@ -27,5 +27,28 @@ export class UsersService {
 
   async updatePassword(userId: string, passwordHash: string): Promise<User> {
     return this.usersRepository.updatePassword(userId, passwordHash)
+  }
+
+  async findById(id: string): Promise<User | null> {
+    return this.usersRepository.findById(id)
+  }
+
+  async upsertByEmailInTx(
+    tx: Prisma.TransactionClient,
+    data: { email: string; name: string; passwordHash: string },
+  ): Promise<{ id: string; email: string; name: string; avatarUrl: string | null }> {
+    const existing = await this.usersRepository.findByEmailInTx(tx, data.email)
+    if (existing) {
+      return this.usersRepository.updateNameInTx(tx, existing.id, data.name)
+    }
+    return this.usersRepository.createInTx(tx, data)
+  }
+
+  async updatePasswordHashInTx(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    passwordHash: string,
+  ): Promise<void> {
+    return this.usersRepository.updatePasswordHashInTx(tx, userId, passwordHash)
   }
 }

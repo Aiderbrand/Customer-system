@@ -33,4 +33,8 @@ export default registerAs('app', () => ({
   passwordReset: {
     expiresInHours: parseInt(process.env['PASSWORD_RESET_EXPIRES_IN_HOURS'] ?? '1', 10),
   },
+
+  onboarding: {
+    enabled: process.env['ONBOARDING_ENABLED'] === 'true',
+  },
 }))

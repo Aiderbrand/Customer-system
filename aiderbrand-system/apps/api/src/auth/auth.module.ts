@@ -6,8 +6,10 @@ import { ConfigModule, ConfigService } from '@nestjs/config'
 import { AuthController } from './auth.controller'
 import { UsersController } from './users.controller'
 import { AuthService } from './auth.service'
+import { AuthMailListener } from './listeners/auth-mail.listener'
 import { RefreshTokenRepository } from './refresh-token.repository'
 import { PasswordResetRepository } from './password-reset.repository'
+import { RoleSimulationRepository } from './role-simulation.repository'
 import { JwtStrategy } from './strategies/jwt.strategy'
 import { RefreshGuard } from './guards/refresh.guard'
 import { PublicRateLimitGuard } from '../common/guards/public-rate-limit.guard'
@@ -15,6 +17,7 @@ import { AuthContextModule } from './auth-context.module'
 
 import { UsersModule } from '../users/users.module'
 import { MembershipsModule } from '../memberships/memberships.module'
+import { CompaniesModule } from '../companies/companies.module'
 import { AuditModule } from '../audit/audit.module'
 import { InvitationsModule } from '../invitations/invitations.module'
 import { MailModule } from '../mail/mail.module'
@@ -51,6 +54,7 @@ import { PrismaModule } from '../prisma/prisma.module'
     // Domain modules
     UsersModule,
     MembershipsModule,
+    CompaniesModule,
     AuditModule,
     MailModule,
 
@@ -62,12 +66,14 @@ import { PrismaModule } from '../prisma/prisma.module'
   controllers: [AuthController, UsersController],
   providers: [
     AuthService,
+    AuthMailListener,
     RefreshTokenRepository,
     PasswordResetRepository,
+    RoleSimulationRepository,
     JwtStrategy,
     RefreshGuard,
     PublicRateLimitGuard,
   ],
-  exports: [AuthService],
+  exports: [AuthService, RefreshTokenRepository],
 })
 export class AuthModule {}

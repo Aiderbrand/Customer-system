@@ -1,4 +1,4 @@
-import type { InvitationStatus, Role } from '@prisma/client'
+import type { InvitationStatus, InvitationType, Role } from '@prisma/client'
 
 /**
  * InvitationDto — public representation of an invitation.
@@ -12,6 +12,7 @@ export interface InvitationDto {
   email: string
   role: Role
   status: InvitationStatus
+  type: InvitationType
   expiresAt: string // ISO8601
   createdById: string | null
   acceptedAt: string | null
@@ -32,7 +33,7 @@ export interface CreateInvitationResponseDto {
   delivery: {
     attempted: boolean
     sent: boolean
-    reason: 'sent' | 'disabled' | 'failed'
+    reason: 'sent' | 'disabled' | 'failed' | 'email_queued'
     manualShareRequired: boolean
   }
 }

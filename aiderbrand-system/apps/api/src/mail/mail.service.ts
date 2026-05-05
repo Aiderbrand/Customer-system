@@ -2,6 +2,15 @@ import { Injectable, Logger } from '@nestjs/common'
 import { ConfigService } from '@nestjs/config'
 import nodemailer from 'nodemailer'
 
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#x27;')
+}
+
 export interface MailDeliveryResult {
   attempted: boolean
   sent: boolean
@@ -41,8 +50,34 @@ export class MailService {
       ].join('\n'),
       html: [
         '<p>Hola,</p>',
-        `<p>${params.inviterName ?? 'El equipo de Aiderbrand'} te invitó a <strong>${params.companyName}</strong> con el rol <strong>${params.roleLabel}</strong>.</p>`,
-        `<p><a href="${params.inviteUrl}">Aceptar invitación</a></p>`,
+        `<p>${escapeHtml(params.inviterName ?? 'El equipo de Aiderbrand')} te invitó a <strong>${escapeHtml(params.companyName)}</strong> con el rol <strong>${escapeHtml(params.roleLabel)}</strong>.</p>`,
+        `<p><a href="${escapeHtml(params.inviteUrl)}">Aceptar invitación</a></p>`,
+        '<p>Si no esperabas este mensaje, podés ignorarlo.</p>',
+      ].join(''),
+    })
+  }
+
+  async sendOnboardingInvitationEmail(
+    to: string,
+    onboardingUrl: string,
+    companyName: string,
+  ): Promise<MailDeliveryResult> {
+    return this.sendMail({
+      to,
+      subject: `Tu acceso a ${companyName} — Completá tu onboarding`,
+      text: [
+        `Hola,`,
+        '',
+        `Fuiste invitado a completar el proceso de onboarding en ${companyName}.`,
+        '',
+        `Accedé desde este enlace para comenzar: ${onboardingUrl}`,
+        '',
+        'Si no esperabas este mensaje, podés ignorarlo.',
+      ].join('\n'),
+      html: [
+        '<p>Hola,</p>',
+        `<p>Fuiste invitado a completar el proceso de onboarding en <strong>${escapeHtml(companyName)}</strong>.</p>`,
+        `<p><a href="${escapeHtml(onboardingUrl)}">Completar onboarding</a></p>`,
         '<p>Si no esperabas este mensaje, podés ignorarlo.</p>',
       ].join(''),
     })
@@ -65,9 +100,9 @@ export class MailService {
         'Si no fuiste vos, podés ignorar este mensaje.',
       ].join('\n'),
       html: [
-        `<p>Hola${params.userName ? ` ${params.userName}` : ''},</p>`,
+        `<p>Hola${params.userName ? ` ${escapeHtml(params.userName)}` : ''},</p>`,
         '<p>Recibimos una solicitud para restablecer tu contraseña.</p>',
-        `<p><a href="${params.resetUrl}">Restablecer contraseña</a></p>`,
+        `<p><a href="${escapeHtml(params.resetUrl)}">Restablecer contraseña</a></p>`,
         '<p>Si no fuiste vos, podés ignorar este mensaje.</p>',
       ].join(''),
     })

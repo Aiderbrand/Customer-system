@@ -1,4 +1,4 @@
-import { IsEmail, IsEnum, IsNotEmpty } from 'class-validator'
+import { IsBoolean, IsEmail, IsEnum, IsNotEmpty, IsOptional } from 'class-validator'
 import { Role } from '../../common/enums/role.enum'
 
 /**
@@ -14,4 +14,8 @@ export class CreateInvitationDto {
   @IsEnum(Role, { message: `role must be one of: ${Object.values(Role).join(', ')}` })
   @IsNotEmpty()
   role!: Role
+
+  @IsOptional()
+  @IsBoolean()
+  withOnboarding?: boolean
 }

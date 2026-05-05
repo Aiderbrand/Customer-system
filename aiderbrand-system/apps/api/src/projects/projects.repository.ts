@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common'
-import type { Prisma, ProjectStatus } from '@prisma/client'
+import type { Phase, Prisma, Project, Task } from '@prisma/client'
+import { PhaseStatus, Priority, ProjectStatus, TaskStatus } from '@prisma/client'
 import { PrismaService } from '../prisma/prisma.service'
 
 const PROJECT_WITH_STATS = {
@@ -13,32 +14,17 @@ const PROJECT_WITH_STATS = {
       where: { deletedAt: null },
       include: { checklist: true },
     },
-    _count: {
-      select: {
-        tickets: { where: { deletedAt: null } },
-      },
-    },
   },
 } satisfies Prisma.ProjectDefaultArgs
 
-type ProjectWithStats = Prisma.ProjectGetPayload<typeof PROJECT_WITH_STATS> & {
-  openTicketCount: number
-}
-
-const TEMPLATE_PHASES = [
-  { name: 'Kick-off', order: 1 },
-  { name: 'Diseño', order: 2 },
-  { name: 'Desarrollo', order: 3 },
-  { name: 'Testing', order: 4 },
-  { name: 'Lanzamiento', order: 5 },
-]
+export type ProjectWithStats = Prisma.ProjectGetPayload<typeof PROJECT_WITH_STATS>
 
 @Injectable()
 export class ProjectsRepository {
   constructor(private readonly prisma: PrismaService) {}
 
   async findManyByCompanyIds(companyIds: string[]): Promise<ProjectWithStats[]> {
-    const projects = await this.prisma.project.findMany({
+    return this.prisma.project.findMany({
       where: {
         companyId: { in: companyIds },
         deletedAt: null,
@@ -46,12 +32,10 @@ export class ProjectsRepository {
       orderBy: { updatedAt: 'desc' },
       ...PROJECT_WITH_STATS,
     })
-
-    return this.enrichWithOpenTickets(projects)
   }
 
   async findByIdWithStats(projectId: string, accessibleCompanyIds: string[]): Promise<ProjectWithStats | null> {
-    const project = await this.prisma.project.findFirst({
+    return this.prisma.project.findFirst({
       where: {
         id: projectId,
         companyId: { in: accessibleCompanyIds },
@@ -59,18 +43,13 @@ export class ProjectsRepository {
       },
       ...PROJECT_WITH_STATS,
     })
-
-    if (!project) return null
-
-    const [enriched] = await this.enrichWithOpenTickets([project])
-    return enriched ?? null
   }
 
-  async findTicketsForProject(projectId: string) {
-    return this.prisma.ticket.findMany({
-      where: { projectId, deletedAt: null },
-      select: { id: true, title: true, status: true, priority: true },
-      orderBy: { createdAt: 'desc' },
+  async findNamesByIds(ids: string[]): Promise<Array<{ id: string; name: string }>> {
+    if (ids.length === 0) return []
+    return this.prisma.project.findMany({
+      where: { id: { in: ids }, deletedAt: null },
+      select: { id: true, name: true },
     })
   }
 
@@ -103,39 +82,105 @@ export class ProjectsRepository {
     companyId: string
     name: string
     description: string
-    actorId: string
+    phases: Array<{ name: string; order: number; isClientVisible: boolean }>
   }) {
     return this.prisma.$transaction(async (tx) => {
       const project = await tx.project.create({
-        data: {
-          companyId: data.companyId,
-          name: data.name,
-          description: data.description,
-        },
+        data: { companyId: data.companyId, name: data.name, description: data.description },
       })
 
-      await tx.phase.createMany({
-        data: TEMPLATE_PHASES.map((tmpl) => ({
-          projectId: project.id,
-          companyId: data.companyId,
-          name: tmpl.name,
-          order: tmpl.order,
-          isClientVisible: true,
-        })),
-      })
-
-      await tx.auditLog.create({
-        data: {
-          actorId: data.actorId,
-          companyId: data.companyId,
-          action: 'project.created',
-          entityType: 'Project',
-          entityId: project.id,
-          metadata: { name: data.name },
-        },
-      })
+      if (data.phases.length > 0) {
+        await tx.phase.createMany({
+          data: data.phases.map((phase) => ({
+            projectId: project.id,
+            companyId: data.companyId,
+            name: phase.name,
+            order: phase.order,
+            isClientVisible: phase.isClientVisible,
+          })),
+        })
+      }
 
       return project
+    })
+  }
+
+  // ─── Atomic InTx building blocks (used by ProjectsService.createProjectInTx) ──
+
+  async createProjectRecordInTx(
+    tx: Prisma.TransactionClient,
+    data: { name: string; companyId: string; projectLeadId: string; status: ProjectStatus },
+  ): Promise<Project> {
+    return tx.project.create({
+      data: {
+        name: data.name,
+        companyId: data.companyId,
+        projectLeadId: data.projectLeadId,
+        status: data.status,
+      },
+    })
+  }
+
+  async createPhaseRecordInTx(
+    tx: Prisma.TransactionClient,
+    data: {
+      name: string
+      order: number
+      status: PhaseStatus
+      completedAt?: Date | null
+      dueAt?: Date | null
+      projectId: string
+      companyId: string
+      isClientVisible: boolean
+    },
+  ): Promise<Phase> {
+    return tx.phase.create({
+      data: {
+        name: data.name,
+        order: data.order,
+        status: data.status,
+        completedAt: data.completedAt ?? null,
+        dueAt: data.dueAt ?? null,
+        projectId: data.projectId,
+        companyId: data.companyId,
+        isClientVisible: data.isClientVisible,
+      },
+    })
+  }
+
+  async createTaskRecordInTx(
+    tx: Prisma.TransactionClient,
+    data: {
+      title: string
+      projectId: string
+      companyId: string
+      phaseId: string
+      status: TaskStatus
+      priority: Priority
+      visibleToClient: boolean
+    },
+  ): Promise<Task> {
+    return tx.task.create({
+      data: {
+        title: data.title,
+        projectId: data.projectId,
+        companyId: data.companyId,
+        phaseId: data.phaseId,
+        status: data.status,
+        priority: data.priority,
+        visibleToClient: data.visibleToClient,
+      },
+    })
+  }
+
+  async createChecklistItemsBulkInTx(
+    tx: Prisma.TransactionClient,
+    taskId: string,
+    labels: string[],
+  ): Promise<void> {
+    if (labels.length === 0) return
+    await tx.taskChecklistItem.createMany({
+      data: labels.map((label) => ({ taskId, label })),
     })
   }
 
@@ -167,7 +212,7 @@ export class ProjectsRepository {
 
   async updatePhase(phaseId: string, data: {
     name?: string
-    status?: string
+    status?: PhaseStatus
     startsAt?: string | null
     dueAt?: string | null
     milestone?: string | null
@@ -178,7 +223,7 @@ export class ProjectsRepository {
       where: { id: phaseId },
       data: {
         ...(data.name !== undefined && { name: data.name }),
-        ...(data.status !== undefined && { status: data.status as never }),
+        ...(data.status !== undefined && { status: data.status }),
         ...(data.isClientVisible !== undefined && { isClientVisible: data.isClientVisible }),
         ...(data.milestone !== undefined && { milestone: data.milestone }),
         ...(data.blocker !== undefined && { blocker: data.blocker }),
@@ -210,37 +255,61 @@ export class ProjectsRepository {
     )
   }
 
-  // ─── Helpers ──────────────────────────────────────────────────────────────────
+  // ─── Task CRUD ────────────────────────────────────────────────────────────────
 
-  private async enrichWithOpenTickets(
-    projects: Prisma.ProjectGetPayload<typeof PROJECT_WITH_STATS>[],
-  ): Promise<ProjectWithStats[]> {
-    if (projects.length === 0) return []
-
-    const projectIds = projects.map((p) => p.id)
-    const openTicketCounts = await this.prisma.ticket.groupBy({
-      by: ['projectId'],
-      where: {
-        projectId: { in: projectIds },
-        status: { notIn: ['cerrado'] },
-        deletedAt: null,
+  async createTask(data: {
+    projectId: string
+    companyId: string
+    phaseId?: string | null
+    title: string
+    priority?: Priority
+    assigneeUserId?: string | null
+    dueAt?: string | null
+    visibleToClient?: boolean
+  }) {
+    return this.prisma.task.create({
+      data: {
+        projectId: data.projectId,
+        companyId: data.companyId,
+        phaseId: data.phaseId ?? null,
+        title: data.title,
+        priority: data.priority ?? Priority.media,
+        assigneeUserId: data.assigneeUserId ?? null,
+        dueAt: data.dueAt ? new Date(data.dueAt) : null,
+        visibleToClient: data.visibleToClient ?? false,
       },
-      _count: { id: true },
+      include: { checklist: true },
     })
-
-    const openCountMap = new Map(
-      openTicketCounts.map((row) => [row.projectId, row._count.id]),
-    )
-
-    return projects.map((p) => ({
-      ...p,
-      openTicketCount: openCountMap.get(p.id) ?? 0,
-    }))
   }
 
-  resolveProjectStatus(status: ProjectStatus): 'active' | 'paused' | 'done' {
-    if (status === 'pausado') return 'paused'
-    if (status === 'finalizado') return 'done'
-    return 'active'
+  async updateTask(taskId: string, data: {
+    title?: string
+    status?: TaskStatus
+    priority?: Priority
+    phaseId?: string | null
+    assigneeUserId?: string | null
+    dueAt?: string | null
+    visibleToClient?: boolean
+  }) {
+    return this.prisma.task.update({
+      where: { id: taskId },
+      data: {
+        ...(data.title !== undefined && { title: data.title }),
+        ...(data.status !== undefined && { status: data.status }),
+        ...(data.priority !== undefined && { priority: data.priority }),
+        ...(data.phaseId !== undefined && { phaseId: data.phaseId }),
+        ...(data.assigneeUserId !== undefined && { assigneeUserId: data.assigneeUserId }),
+        ...(data.visibleToClient !== undefined && { visibleToClient: data.visibleToClient }),
+        ...(data.dueAt !== undefined && { dueAt: data.dueAt ? new Date(data.dueAt) : null }),
+      },
+      include: { checklist: true },
+    })
+  }
+
+  async deleteTask(taskId: string) {
+    return this.prisma.task.update({
+      where: { id: taskId },
+      data: { deletedAt: new Date() },
+    })
   }
 }

@@ -31,6 +31,8 @@ import { CreatePhaseDto } from './dto/create-phase.dto'
 import { UpdatePhaseDto } from './dto/update-phase.dto'
 import { ReorderPhasesDto } from './dto/reorder-phases.dto'
 import { CreateNoteDto } from './dto/create-note.dto'
+import { CreateTaskDto } from './dto/create-task.dto'
+import { UpdateTaskDto } from './dto/update-task.dto'
 
 @Controller()
 export class ProjectsController {
@@ -112,7 +114,7 @@ export class ProjectsController {
   @OptionalCompanyScope()
   @AllowInternalCrossCompany()
   async getWorkspace(
-    @Param('projectId') projectId: string,
+    @Param('projectId', ParseUUIDPipe) projectId: string,
     @CurrentUser() currentUser: JwtPayload,
     @AuthContext() authContext: AuthContextData,
   ) {
@@ -133,12 +135,14 @@ export class ProjectsController {
   @AllowInternalCrossCompany()
   @RequireRoles(Role.SYSTEM_ADMIN, Role.PROJECT_LEAD, Role.DELIVERY_SPECIALIST)
   async createPhase(
-    @Param('projectId') projectId: string,
+    @Param('projectId', ParseUUIDPipe) projectId: string,
     @Body() dto: CreatePhaseDto,
+    @CurrentUser() currentUser: JwtPayload,
     @AuthContext() authContext: AuthContextData,
   ) {
     return this.projectsService.createPhase({
       projectId,
+      actorId: currentUser.sub,
       actorRole: authContext.effectiveRole as Role,
       accessibleCompanyIds: authContext.actorScope.realDataCompanyIds,
       dto,
@@ -154,12 +158,14 @@ export class ProjectsController {
   @AllowInternalCrossCompany()
   @RequireRoles(Role.SYSTEM_ADMIN, Role.PROJECT_LEAD, Role.DELIVERY_SPECIALIST)
   async reorderPhases(
-    @Param('projectId') projectId: string,
+    @Param('projectId', ParseUUIDPipe) projectId: string,
     @Body() dto: ReorderPhasesDto,
+    @CurrentUser() currentUser: JwtPayload,
     @AuthContext() authContext: AuthContextData,
   ) {
     await this.projectsService.reorderPhases({
       projectId,
+      actorId: currentUser.sub,
       actorRole: authContext.effectiveRole as Role,
       accessibleCompanyIds: authContext.actorScope.realDataCompanyIds,
       orderedIds: dto.orderedIds,
@@ -175,14 +181,16 @@ export class ProjectsController {
   @AllowInternalCrossCompany()
   @RequireRoles(Role.SYSTEM_ADMIN, Role.PROJECT_LEAD, Role.DELIVERY_SPECIALIST)
   async updatePhase(
-    @Param('projectId') projectId: string,
-    @Param('phaseId') phaseId: string,
+    @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('phaseId', ParseUUIDPipe) phaseId: string,
     @Body() dto: UpdatePhaseDto,
+    @CurrentUser() currentUser: JwtPayload,
     @AuthContext() authContext: AuthContextData,
   ) {
     return this.projectsService.updatePhase({
       projectId,
       phaseId,
+      actorId: currentUser.sub,
       actorRole: authContext.effectiveRole as Role,
       accessibleCompanyIds: authContext.actorScope.realDataCompanyIds,
       dto,
@@ -198,13 +206,15 @@ export class ProjectsController {
   @AllowInternalCrossCompany()
   @RequireRoles(Role.SYSTEM_ADMIN, Role.PROJECT_LEAD, Role.DELIVERY_SPECIALIST)
   async deletePhase(
-    @Param('projectId') projectId: string,
-    @Param('phaseId') phaseId: string,
+    @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('phaseId', ParseUUIDPipe) phaseId: string,
+    @CurrentUser() currentUser: JwtPayload,
     @AuthContext() authContext: AuthContextData,
   ) {
     await this.projectsService.deletePhase({
       projectId,
       phaseId,
+      actorId: currentUser.sub,
       actorRole: authContext.effectiveRole as Role,
       accessibleCompanyIds: authContext.actorScope.realDataCompanyIds,
     })
@@ -219,7 +229,7 @@ export class ProjectsController {
   @AllowInternalCrossCompany()
   @RequireRoles(Role.SYSTEM_ADMIN, Role.PROJECT_LEAD, Role.DELIVERY_SPECIALIST)
   async createNote(
-    @Param('projectId') projectId: string,
+    @Param('projectId', ParseUUIDPipe) projectId: string,
     @Body() dto: CreateNoteDto,
     @CurrentUser() currentUser: JwtPayload,
     @AuthContext() authContext: AuthContextData,
@@ -230,6 +240,77 @@ export class ProjectsController {
       actorRole: authContext.effectiveRole as Role,
       accessibleCompanyIds: authContext.actorScope.realDataCompanyIds,
       dto,
+    })
+  }
+
+  // ─── Create task ─────────────────────────────────────────────────────────────
+
+  @Post('projects/:projectId/tasks')
+  @HttpCode(HttpStatus.CREATED)
+  @UseGuards(JwtAuthGuard, AuthContextGuard, RolesGuard)
+  @OptionalCompanyScope()
+  @AllowInternalCrossCompany()
+  @RequireRoles(Role.SYSTEM_ADMIN, Role.PROJECT_LEAD, Role.DELIVERY_SPECIALIST)
+  async createTask(
+    @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Body() dto: CreateTaskDto,
+    @CurrentUser() currentUser: JwtPayload,
+    @AuthContext() authContext: AuthContextData,
+  ) {
+    return this.projectsService.createTask({
+      projectId,
+      actorId: currentUser.sub,
+      actorRole: authContext.effectiveRole as Role,
+      accessibleCompanyIds: authContext.actorScope.realDataCompanyIds,
+      dto,
+    })
+  }
+
+  // ─── Update task ─────────────────────────────────────────────────────────────
+
+  @Patch('projects/:projectId/tasks/:taskId')
+  @HttpCode(HttpStatus.OK)
+  @UseGuards(JwtAuthGuard, AuthContextGuard, RolesGuard)
+  @OptionalCompanyScope()
+  @AllowInternalCrossCompany()
+  @RequireRoles(Role.SYSTEM_ADMIN, Role.PROJECT_LEAD, Role.DELIVERY_SPECIALIST)
+  async updateTask(
+    @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('taskId', ParseUUIDPipe) taskId: string,
+    @Body() dto: UpdateTaskDto,
+    @CurrentUser() currentUser: JwtPayload,
+    @AuthContext() authContext: AuthContextData,
+  ) {
+    return this.projectsService.updateTask({
+      projectId,
+      taskId,
+      actorId: currentUser.sub,
+      actorRole: authContext.effectiveRole as Role,
+      accessibleCompanyIds: authContext.actorScope.realDataCompanyIds,
+      dto,
+    })
+  }
+
+  // ─── Delete task ─────────────────────────────────────────────────────────────
+
+  @Delete('projects/:projectId/tasks/:taskId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @UseGuards(JwtAuthGuard, AuthContextGuard, RolesGuard)
+  @OptionalCompanyScope()
+  @AllowInternalCrossCompany()
+  @RequireRoles(Role.SYSTEM_ADMIN, Role.PROJECT_LEAD, Role.DELIVERY_SPECIALIST)
+  async deleteTask(
+    @Param('projectId', ParseUUIDPipe) projectId: string,
+    @Param('taskId', ParseUUIDPipe) taskId: string,
+    @CurrentUser() currentUser: JwtPayload,
+    @AuthContext() authContext: AuthContextData,
+  ) {
+    await this.projectsService.deleteTask({
+      projectId,
+      taskId,
+      actorId: currentUser.sub,
+      actorRole: authContext.effectiveRole as Role,
+      accessibleCompanyIds: authContext.actorScope.realDataCompanyIds,
     })
   }
 

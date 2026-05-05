@@ -105,7 +105,7 @@ interface CreateInvitationApiResponse {
   delivery: {
     attempted: boolean
     sent: boolean
-    reason: 'sent' | 'disabled' | 'failed'
+    reason: 'sent' | 'disabled' | 'failed' | 'email_queued'
     manualShareRequired: boolean
   }
 }
@@ -115,6 +115,7 @@ interface CompanyScopeOptionApiResponse {
   name: string
   slug: string
   createdAt: string
+  updatedAt?: string
 }
 
 function toHubItem(item: CompaniesListApiResponse['items'][number]): CompanyHubItem {
@@ -191,7 +192,7 @@ export const companyService = {
       name: company.name,
       slug: company.slug,
       createdAt: new Date(company.createdAt),
-      updatedAt: new Date(company.createdAt),
+      updatedAt: company.updatedAt ? new Date(company.updatedAt) : new Date(company.createdAt),
       isActive: true,
       activeMemberCount: 0,
       pendingInvitationCount: 0,
@@ -260,7 +261,7 @@ export const companyService = {
     }
   },
 
-  async createInvitation(companyId: string, body: { email: string; role: Role }) {
+  async createInvitation(companyId: string, body: { email: string; role: Role; withOnboarding?: boolean }) {
     const payload = await apiClient.request<CreateInvitationApiResponse>(`/companies/${companyId}/invitations`, {
       method: 'POST',
       body,

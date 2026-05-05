@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common'
 import { PrismaService } from '../prisma/prisma.service'
-import type { RefreshToken } from '@prisma/client'
-import { createHash } from 'crypto'
+import type { Prisma, RefreshToken } from '@prisma/client'
+import { hashToken } from '../common/utils/crypto'
 
 /**
  * RefreshTokenRepository — manages server-side refresh token lifecycle.
@@ -13,9 +13,8 @@ import { createHash } from 'crypto'
 export class RefreshTokenRepository {
   constructor(private readonly prisma: PrismaService) {}
 
-  /** Hash an opaque token with SHA-256 for DB storage */
   hash(rawToken: string): string {
-    return createHash('sha256').update(rawToken).digest('hex')
+    return hashToken(rawToken)
   }
 
   /** Create a new refresh token record */
@@ -46,9 +45,22 @@ export class RefreshTokenRepository {
     })
   }
 
+  /** Create a refresh token record inside an existing transaction */
+  async createInTx(tx: Prisma.TransactionClient, data: { userId: string; tokenHash: string; expiresAt: Date }): Promise<void> {
+    await tx.refreshToken.create({ data })
+  }
+
   /** Revoke all active refresh tokens for a user (e.g. on password reset) */
   async revokeAllForUser(userId: string): Promise<void> {
     await this.prisma.refreshToken.updateMany({
+      where: { userId, revokedAt: null },
+      data: { revokedAt: new Date() },
+    })
+  }
+
+  /** Revoke all active refresh tokens for a user inside an existing transaction */
+  async revokeAllForUserInTx(tx: Prisma.TransactionClient, userId: string): Promise<void> {
+    await tx.refreshToken.updateMany({
       where: { userId, revokedAt: null },
       data: { revokedAt: new Date() },
     })

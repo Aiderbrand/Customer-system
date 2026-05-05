@@ -54,14 +54,9 @@ export class TicketsController {
     @Query('q') search: string | undefined,
     @AuthContext() authContext: AuthContextData,
   ) {
-    const requestedCompanyIds = this.parseIds(companyIdsParam)
-    const accessibleIds = authContext.actorScope.realDataCompanyIds
-    const companyIds = requestedCompanyIds.length > 0
-      ? requestedCompanyIds.filter((id) => accessibleIds.includes(id))
-      : accessibleIds
-
     return this.ticketsService.list({
-      companyIds,
+      accessibleCompanyIds: authContext.actorScope.realDataCompanyIds,
+      requestedCompanyIds: this.parseIds(companyIdsParam),
       projectId: projectId ?? undefined,
       status: statusParam ? (statusParam.split(',') as TicketStatus[]) : undefined,
       priority: priorityParam ? (priorityParam.split(',') as Priority[]) : undefined,
@@ -119,9 +114,16 @@ export class TicketsController {
 
   @Patch('tickets/:ticketId')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(JwtAuthGuard, AuthContextGuard)
+  @UseGuards(JwtAuthGuard, AuthContextGuard, RolesGuard)
   @OptionalCompanyScope()
   @AllowInternalCrossCompany()
+  @RequireRoles(
+    Role.SYSTEM_ADMIN,
+    Role.PROJECT_LEAD,
+    Role.DELIVERY_SPECIALIST,
+    Role.ACCOUNT_OWNER,
+    Role.COLLABORATOR,
+  )
   async update(
     @Param('ticketId') ticketId: string,
     @Body() dto: UpdateTicketDto,
@@ -130,6 +132,7 @@ export class TicketsController {
     return this.ticketsService.update(
       ticketId,
       authContext.actorScope.realDataCompanyIds,
+      authContext.actorUserId,
       {
         title: dto.title,
         description: dto.description,
@@ -143,9 +146,16 @@ export class TicketsController {
 
   @Patch('tickets/:ticketId/status')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(JwtAuthGuard, AuthContextGuard)
+  @UseGuards(JwtAuthGuard, AuthContextGuard, RolesGuard)
   @OptionalCompanyScope()
   @AllowInternalCrossCompany()
+  @RequireRoles(
+    Role.SYSTEM_ADMIN,
+    Role.PROJECT_LEAD,
+    Role.DELIVERY_SPECIALIST,
+    Role.ACCOUNT_OWNER,
+    Role.COLLABORATOR,
+  )
   async changeStatus(
     @Param('ticketId') ticketId: string,
     @Body() dto: ChangeStatusDto,
@@ -164,9 +174,14 @@ export class TicketsController {
 
   @Patch('tickets/:ticketId/assignee')
   @HttpCode(HttpStatus.OK)
-  @UseGuards(JwtAuthGuard, AuthContextGuard)
+  @UseGuards(JwtAuthGuard, AuthContextGuard, RolesGuard)
   @OptionalCompanyScope()
   @AllowInternalCrossCompany()
+  @RequireRoles(
+    Role.SYSTEM_ADMIN,
+    Role.PROJECT_LEAD,
+    Role.DELIVERY_SPECIALIST,
+  )
   async assign(
     @Param('ticketId') ticketId: string,
     @Body() dto: AssignTicketDto,
@@ -175,6 +190,7 @@ export class TicketsController {
     return this.ticketsService.assignTicket(
       ticketId,
       dto.assigneeId,
+      authContext.actorUserId,
       authContext.actorScope.realDataCompanyIds,
     )
   }
@@ -183,9 +199,16 @@ export class TicketsController {
 
   @Post('tickets/:ticketId/comments')
   @HttpCode(HttpStatus.CREATED)
-  @UseGuards(JwtAuthGuard, AuthContextGuard)
+  @UseGuards(JwtAuthGuard, AuthContextGuard, RolesGuard)
   @OptionalCompanyScope()
   @AllowInternalCrossCompany()
+  @RequireRoles(
+    Role.SYSTEM_ADMIN,
+    Role.PROJECT_LEAD,
+    Role.DELIVERY_SPECIALIST,
+    Role.ACCOUNT_OWNER,
+    Role.COLLABORATOR,
+  )
   async addComment(
     @Param('ticketId') ticketId: string,
     @Body() dto: AddCommentDto,

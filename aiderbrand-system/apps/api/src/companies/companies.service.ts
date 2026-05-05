@@ -5,12 +5,13 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common'
-import type { AuditLog, Company, Role } from '@prisma/client'
-import type { Prisma } from '@prisma/client'
+import { OnboardingStatus, Prisma, type AuditLog, type Company, type Role } from '@prisma/client'
 import { CompaniesRepository } from './companies.repository'
 import { Role as LocalRole } from '../common/enums/role.enum'
 import { MembershipsService } from '../memberships/memberships.service'
 import { InvitationsService } from '../invitations/invitations.service'
+import { AuditService } from '../audit/audit.service'
+import { PrismaService } from '../prisma/prisma.service'
 
 const COMPANY_CREATOR_ROLES = new Set<Role>([LocalRole.SYSTEM_ADMIN])
 const COMPANY_EDITOR_ROLES = new Set<Role>([LocalRole.SYSTEM_ADMIN, LocalRole.PROJECT_LEAD])
@@ -20,15 +21,16 @@ type CompanySort = 'name.asc' | 'name.desc' | 'updatedAt.asc' | 'updatedAt.desc'
 @Injectable()
 export class CompaniesService {
   constructor(
+    private readonly prisma: PrismaService,
     private readonly companiesRepository: CompaniesRepository,
     private readonly membershipsService: MembershipsService,
     private readonly invitationsService: InvitationsService,
+    private readonly auditService: AuditService,
   ) {}
 
   async create(params: {
     actorId: string
     actorRole: Role
-    sourceCompanyId?: string
     name: string
     slug?: string
   }) {
@@ -46,13 +48,37 @@ export class CompaniesService {
       throw new ConflictException(`Company slug "${normalizedSlug}" already exists`)
     }
 
-    return this.companiesRepository.createWithCreatorMembership({
+    let company: Company
+    try {
+      company = await this.prisma.$transaction(async (tx) => {
+        const created = await this.companiesRepository.createInTx(tx, {
+          name: normalizedName,
+          slug: normalizedSlug,
+        })
+        await this.membershipsService.upsertInTx(tx, {
+          userId: params.actorId,
+          companyId: created.id,
+          role: params.actorRole,
+        })
+        return created
+      })
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictException(`Company slug "${normalizedSlug}" already exists`)
+      }
+      throw error
+    }
+
+    this.auditService.logSafe({
       actorId: params.actorId,
-      actorRole: params.actorRole,
-      sourceCompanyId: params.sourceCompanyId,
-      name: normalizedName,
-      slug: normalizedSlug,
-    })
+      companyId: company.id,
+      action: 'company.created',
+      entityType: 'Company',
+      entityId: company.id,
+      metadata: { name: normalizedName, slug: normalizedSlug },
+    }).catch(() => {})
+
+    return company
   }
 
   async list(params: {
@@ -114,20 +140,14 @@ export class CompaniesService {
 
     const companies = memberships
       .filter((membership) => {
-        const company = (membership as typeof membership & {
-          company?: {
-            isActive: boolean
-            deletedAt: Date | null
-          } | null
-        }).company
-
+        const company = membership.company
         return membership.isActive && !!company && company.isActive && company.deletedAt === null
       })
       .map((membership) => ({
         id: membership.companyId,
-        name: (membership as typeof membership & { company: { name: string } }).company.name,
-        slug: (membership as typeof membership & { company: { slug: string } }).company.slug,
-        createdAt: (membership as typeof membership & { company: { createdAt: Date } }).company.createdAt,
+        name: membership.company!.name,
+        slug: membership.company!.slug,
+        createdAt: membership.company!.createdAt,
       }))
 
     const seen = new Set<string>()
@@ -144,9 +164,15 @@ export class CompaniesService {
 
   async getDetail(params: {
     companyId: string
+    actorUserId: string
     actorRole: Role
   }) {
     const company = await this.findByIdOrThrow(params.companyId)
+
+    if (params.actorRole === LocalRole.ACCOUNT_OWNER) {
+      const membership = await this.membershipsService.getActiveMembership(params.actorUserId, params.companyId)
+      if (!membership) throw new ForbiddenException('Access denied to this company')
+    }
     const [members, invitations, activity] = await Promise.all([
       this.membershipsService.listMembershipsForCompany(company.id, 'all'),
       this.invitationsService.listForCompany(company.id),
@@ -181,13 +207,30 @@ export class CompaniesService {
     const nextName = params.name ? this.normalizeName(params.name) : company.name
     const nextSlug = params.slug ? this.normalizeSlug(params.slug) : company.slug
 
-    return this.companiesRepository.updateCompany({
-      companyId: company.id,
+    let updated: Company
+    try {
+      updated = await this.companiesRepository.updateCompany({
+        companyId: company.id,
+        name: nextName,
+        slug: nextSlug,
+      })
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new ConflictException(`Company slug "${nextSlug}" already exists`)
+      }
+      throw error
+    }
+
+    this.auditService.logSafe({
       actorId: params.actorId,
-      actorRole: params.actorRole,
-      name: nextName,
-      slug: nextSlug,
-    })
+      companyId: company.id,
+      action: 'company.updated',
+      entityType: 'Company',
+      entityId: company.id,
+      metadata: { prevName: company.name, nextName, prevSlug: company.slug, nextSlug },
+    }).catch(() => {})
+
+    return updated
   }
 
   async updateStatus(params: {
@@ -207,12 +250,36 @@ export class CompaniesService {
       return company
     }
 
-    return this.companiesRepository.updateStatus({
+    const updated = await this.companiesRepository.updateStatus({
       companyId: company.id,
-      actorId: params.actorId,
-      actorRole: params.actorRole,
       isActive: nextIsActive,
     })
+
+    this.auditService.logSafe({
+      actorId: params.actorId,
+      companyId: company.id,
+      action: nextIsActive ? 'company.activated' : 'company.deactivated',
+      entityType: 'Company',
+      entityId: company.id,
+    }).catch(() => {})
+
+    return updated
+  }
+
+  async setOnboardingStatus(companyId: string, status: OnboardingStatus): Promise<void> {
+    await this.companiesRepository.updateOnboardingStatus(companyId, status)
+  }
+
+  async updateOnboardingStatusInTx(
+    tx: Prisma.TransactionClient,
+    companyId: string,
+    status: OnboardingStatus,
+  ): Promise<void> {
+    await this.companiesRepository.updateOnboardingStatusInTx(tx, companyId, status)
+  }
+
+  async findAllActiveIds(): Promise<string[]> {
+    return this.companiesRepository.findAllActiveIds()
   }
 
   async findByIdOrThrow(id: string): Promise<Company> {
@@ -225,7 +292,7 @@ export class CompaniesService {
 
   async listActivity(companyId: string): Promise<AuditLog[]> {
     await this.findByIdOrThrow(companyId)
-    return this.companiesRepository.listActivity(companyId)
+    return this.auditService.listByCompanyId(companyId)
   }
 
   private resolveSort(sort?: CompanySort) {
